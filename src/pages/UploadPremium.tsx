@@ -40,8 +40,8 @@ export default function UploadPremium() {
   };
 
   const handlePaymentAndUpload = async () => {
-    if (files.length < 1) { // In a real app, this might be 10, but for testing we allow 1
-      setError("Пожалуйста, загрузите хотя бы 1 фото (рекомендуется 10-15)");
+    if (files.length < 10) { // Enforce 10-15 images for premium quality
+      setError("Пожалуйста, загрузите от 10 до 15 фото для достижения высокого качества");
       return;
     }
     if (!agreed) {
