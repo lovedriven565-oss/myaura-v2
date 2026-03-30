@@ -7,6 +7,7 @@ import { dirname } from "path";
 import { initDb } from "./src/server/db.js";
 import { startRetentionCron } from "./src/server/retention.js";
 import { apiRouter } from "./src/server/routes.js";
+import { initTelegramBot } from "./src/server/telegram.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -19,9 +20,10 @@ async function startServer() {
   app.use(cors());
   app.use(express.json());
 
-  // Initialize DB and Storage
+  // Initialize DB, Storage and Telegram Bot
   initDb();
   startRetentionCron();
+  initTelegramBot();
 
   // API Routes
   app.use("/api", apiRouter);
