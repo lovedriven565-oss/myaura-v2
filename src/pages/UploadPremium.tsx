@@ -58,8 +58,8 @@ export default function UploadPremium() {
     setError("");
 
     const formData = new FormData();
-    // Just sending the first file for the MVP API
-    formData.append("image", files[0]);
+    // Send all files for premium API
+    files.forEach(file => formData.append("images", file));
     formData.append("type", "premium");
     formData.append("preset", selectedStyle);
     formData.append("package", selectedPackage);

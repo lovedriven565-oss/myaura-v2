@@ -30,7 +30,7 @@ export default function UploadFree() {
     setError("");
 
     const formData = new FormData();
-    formData.append("image", file);
+    formData.append("images", file); // Must match backend expectation of 'images'
     formData.append("type", "free");
     formData.append("preset", "business");
 

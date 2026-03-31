@@ -3,6 +3,7 @@ import { aiProvider } from "./ai.js";
 import { storage } from "./storage.js";
 import { getDb } from "./db.js";
 import { v4 as uuidv4 } from "uuid";
+import { buildPrompt, PromptType, StyleId } from "./prompts.js";
 
 export function initTelegramBot() {
   const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -48,7 +49,7 @@ export function initTelegramBot() {
       const originalPath = await storage.save(buffer, originalName, "original");
 
       const preset = "business"; // Default preset for direct upload
-      const prompt = "Create a professional business headshot, high-end studio lighting, sharp suit, confident expression, neutral background.";
+      const prompt = buildPrompt("free", preset as StyleId);
       
       const base64Image = buffer.toString("base64");
       const resultBase64 = await aiProvider.generateImage(base64Image, mimeType, prompt);

@@ -4,35 +4,45 @@ import { v4 as uuidv4 } from "uuid";
 import { getDb } from "./db.js";
 import { storage } from "./storage.js";
 import { aiProvider } from "./ai.js";
+import { buildPrompt, PromptType, StyleId } from "./prompts.js";
 
 export const apiRouter = Router();
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB limit
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB limit per file
 
-// Presets
-const PRESETS: Record<string, string> = {
-  business: "Create a professional business headshot, high-end studio lighting, sharp suit, confident expression, neutral background.",
-  studio: "Create a high-fashion studio editorial portrait, dramatic lighting, stylish outfit, vogue magazine style.",
-  nature: "Create an outdoor natural lighting portrait lifestyle, soft sunlight, blurred nature background, relaxed and approachable.",
-};
-
-// 1. Upload & Start Generation
-apiRouter.post("/generate", upload.single("image"), async (req, res, next) => {
+// 1. Upload & Start Generation (Supports single file for 'free' and multiple for 'premium')
+apiRouter.post("/generate", upload.array("images", 15), async (req, res, next) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: "No image provided", code: "MISSING_IMAGE" });
+    const files = req.files as Express.Multer.File[];
+    if (!files || files.length === 0) {
+      return res.status(400).json({ error: "No images provided", code: "MISSING_IMAGE" });
     }
 
-    const { type, preset } = req.body; // 'free' | 'premium', preset name
+    const { type, preset } = req.body; // 'free' | 'premium', preset name (styleId)
     if (!type || !["free", "premium"].includes(type)) {
-      return res.status(400).json({ error: "Invalid type", code: "INVALID_TYPE" });
+      return res.status(400).json({ error: "Invalid type. Must be 'free' or 'premium'", code: "INVALID_TYPE" });
     }
 
-    const prompt = PRESETS[preset] || PRESETS["business"];
+    if (type === "premium" && files.length < 10) {
+      return res.status(400).json({ error: "Premium requires 10-15 images for reference", code: "INSUFFICIENT_IMAGES" });
+    }
+
+    if (type === "free" && files.length > 1) {
+      return res.status(400).json({ error: "Free preview only accepts 1 image", code: "TOO_MANY_IMAGES" });
+    }
+
+    // Build strictly backend-controlled prompt
+    const prompt = buildPrompt(type as PromptType, preset as StyleId);
+    
     const id = uuidv4();
     const userId = req.headers["x-user-id"] || "anonymous";
 
-    // Save original
-    const originalPath = await storage.save(req.file.buffer, req.file.originalname, "original");
+    // Save originals
+    const originalPaths: string[] = [];
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const path = await storage.save(file.buffer, `${id}_${i}_${file.originalname}`, "original");
+      originalPaths.push(path);
+    }
 
     // Calculate expiration
     const retentionMinutes = type === "premium" 
@@ -50,7 +60,7 @@ apiRouter.post("/generate", upload.single("image"), async (req, res, next) => {
         user_id: userId,
         type,
         status: "processing",
-        original_path: originalPath,
+        original_path: originalPaths[0], // Store first reference for legacy compat, consider standardizing to array in db
         prompt_preset: preset,
         expires_at: expiresAt
       });
@@ -65,12 +75,14 @@ apiRouter.post("/generate", upload.single("image"), async (req, res, next) => {
 
     // Background processing
     try {
-      const base64Image = req.file!.buffer.toString("base64");
-      const mimeType = req.file!.mimetype;
+      // For MVP AI Provider, we use the first image as base reference (even for premium, until Vertex UI handles multiple)
+      const baseFile = files[0];
+      const base64Image = baseFile.buffer.toString("base64");
+      const mimeType = baseFile.mimetype;
       
       const resultBase64 = await aiProvider.generateImage(base64Image, mimeType, prompt);
       const resultBuffer = Buffer.from(resultBase64, "base64");
-      const resultPath = await storage.save(resultBuffer, "result.jpg", "result");
+      const resultPath = await storage.save(resultBuffer, `${id}_result.jpg`, "result");
 
       await db
         .from("generations")
