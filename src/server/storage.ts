@@ -24,9 +24,11 @@ export class R2Storage implements IStorage {
       console.warn("R2 credentials missing. Storage will fail.");
     }
 
+    const endpoint = process.env.R2_S3_ENDPOINT || `https://${accountId}.eu.r2.cloudflarestorage.com`;
+
     this.s3 = new S3Client({
       region: "auto",
-      endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
+      endpoint,
       credentials: {
         accessKeyId: accessKeyId || "",
         secretAccessKey: secretAccessKey || "",
