@@ -24,19 +24,17 @@ export class VertexAIProvider implements IGenerationProvider {
       // natively optimized for generating and editing images while preserving context.
       const response = await this.ai.models.generateContent({
         model: "gemini-3-pro-image-preview", 
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                data: originalImageBase64,
-                mimeType: mimeType,
-              },
+        contents: [
+          {
+            inlineData: {
+              data: originalImageBase64,
+              mimeType: mimeType,
             },
-            {
-              text: prompt,
-            },
-          ],
-        },
+          },
+          {
+            text: prompt,
+          },
+        ],
         config: {
           // Use standard image generation config matching the Gemini fallback
           imageConfig: {
@@ -72,19 +70,17 @@ export class GeminiProvider implements IGenerationProvider {
     try {
       const response = await this.ai.models.generateContent({
         model: "gemini-3.1-flash-image-preview",
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                data: originalImageBase64,
-                mimeType: mimeType,
-              },
+        contents: [
+          {
+            inlineData: {
+              data: originalImageBase64,
+              mimeType: mimeType,
             },
-            {
-              text: prompt,
-            },
-          ],
-        },
+          },
+          {
+            text: prompt,
+          },
+        ],
         config: {
           imageConfig: {
             aspectRatio: "3:4",
