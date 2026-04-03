@@ -2,6 +2,15 @@ import React, { useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { Camera, X, Sparkles, Star, Check, Crown, Image as ImageIcon, ShieldCheck, ArrowRight } from "lucide-react";
 
+// Detect Telegram Mini App chat ID for delivery
+function getTelegramChatId(): string | null {
+  try {
+    const tg = (window as any).Telegram?.WebApp;
+    const userId = tg?.initDataUnsafe?.user?.id;
+    return userId ? String(userId) : null;
+  } catch { return null; }
+}
+
 const PREMIUM_STYLES = [
   { id: "business", name: "Бизнес-портрет", desc: "Строгий и дорогой корпоративный стиль" },
   { id: "lifestyle", name: "Премиум lifestyle", desc: "Естественный свет, дорогие интерьеры" },
@@ -58,11 +67,11 @@ export default function UploadPremium() {
     setError("");
 
     const formData = new FormData();
-    // Send all files for premium API
     files.forEach(file => formData.append("images", file));
-    formData.append("type", "premium");
-    formData.append("preset", selectedStyle);
-    formData.append("package", selectedPackage);
+    formData.append("packageId", selectedPackage);
+    formData.append("styleIds", JSON.stringify([selectedStyle]));
+    const chatId = getTelegramChatId();
+    if (chatId) formData.append("telegramChatId", chatId);
 
     try {
       const res = await fetch("/api/generate", {

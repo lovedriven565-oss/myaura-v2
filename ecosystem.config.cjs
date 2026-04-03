@@ -3,8 +3,8 @@ module.exports = {
     {
       name: "myaura-app",
       script: "dist/server.js",
-      instances: "max", // Or a specific number like 2
-      exec_mode: "cluster",
+      instances: 1,
+      exec_mode: "fork",
       env: {
         NODE_ENV: "production",
         PORT: 3000,

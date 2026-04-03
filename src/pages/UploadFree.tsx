@@ -2,6 +2,15 @@ import React, { useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { Camera, X, Sparkles, Sun, Wand2 } from "lucide-react";
 
+// Detect Telegram Mini App chat ID for delivery
+function getTelegramChatId(): string | null {
+  try {
+    const tg = (window as any).Telegram?.WebApp;
+    const userId = tg?.initDataUnsafe?.user?.id;
+    return userId ? String(userId) : null;
+  } catch { return null; }
+}
+
 export default function UploadFree() {
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
@@ -30,9 +39,11 @@ export default function UploadFree() {
     setError("");
 
     const formData = new FormData();
-    formData.append("images", file); // Must match backend expectation of 'images'
-    formData.append("type", "free");
-    formData.append("preset", "business");
+    formData.append("images", file);
+    formData.append("packageId", "free");
+    formData.append("styleIds", JSON.stringify(["business"]));
+    const chatId = getTelegramChatId();
+    if (chatId) formData.append("telegramChatId", chatId);
 
     try {
       const res = await fetch("/api/generate", {

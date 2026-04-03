@@ -1,37 +1,36 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { Sparkles, Check } from "lucide-react";
+import { Sparkles, Check, AlertTriangle } from "lucide-react";
+
+interface ProgressData {
+  completed: number;
+  failed: number;
+  total: number;
+}
 
 export default function Processing() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const [progress, setProgress] = useState(0);
+  const [progress, setProgress] = useState<ProgressData>({ completed: 0, failed: 0, total: 1 });
+  const [status, setStatus] = useState<string>("processing");
 
   useEffect(() => {
-    // Simulate progress
-    const interval = setInterval(() => {
-      setProgress((p) => {
-        if (p >= 95) return 95;
-        return p + 5;
-      });
-    }, 500);
-
-    // Poll status
     const poll = setInterval(async () => {
       try {
         const res = await fetch(`/api/status/${id}`);
         const data = await res.json();
-        
-        if (data.status === "completed") {
+
+        if (data.progress) {
+          setProgress(data.progress);
+        }
+        setStatus(data.status);
+
+        if (data.status === "completed" || data.status === "partial") {
           clearInterval(poll);
-          clearInterval(interval);
-          setProgress(100);
-          setTimeout(() => navigate(`/result/${id}`), 500);
+          setTimeout(() => navigate(`/result/${id}`), 800);
         } else if (data.status === "failed") {
           clearInterval(poll);
-          clearInterval(interval);
-          // Handle error
-          alert("Ошибка генерации: " + data.error);
+          alert("Ошибка генерации: " + (data.error || "Неизвестная ошибка"));
           navigate("/");
         }
       } catch (err) {
@@ -39,11 +38,13 @@ export default function Processing() {
       }
     }, 2000);
 
-    return () => {
-      clearInterval(interval);
-      clearInterval(poll);
-    };
+    return () => clearInterval(poll);
   }, [id, navigate]);
+
+  const pct = progress.total > 0
+    ? Math.round(((progress.completed + progress.failed) / progress.total) * 100)
+    : 0;
+  const isMulti = progress.total > 1;
 
   return (
     <div className="bg-[#0a0a0a] text-white font-sans min-h-screen flex flex-col items-center justify-center p-6 overflow-hidden relative selection:bg-purple-500/30">
@@ -62,15 +63,28 @@ export default function Processing() {
           <div className="relative w-48 h-48 rounded-full bg-white/[0.02] border border-white/5 flex flex-col items-center justify-center shadow-[0_0_50px_rgba(192,132,252,0.1)] overflow-hidden backdrop-blur-sm">
             <div className="absolute inset-0 bg-gradient-to-tr from-[#c084fc]/10 to-transparent"></div>
             <Sparkles className="text-[#d8b4fe] w-10 h-10 mb-3" />
-            <div className="text-[11px] uppercase tracking-[0.2em] text-white/50 font-medium">Обработка</div>
+            <div className="text-[11px] uppercase tracking-[0.2em] text-white/50 font-medium">
+              {status === "processing" ? "Обработка" : "Готово"}
+            </div>
           </div>
         </div>
 
         <div className="text-center space-y-4 px-4">
-          <h1 className="text-3xl font-light tracking-tight text-white leading-tight">Создаем ваш образ...</h1>
-          <p className="text-white/60 text-[15px] font-light leading-relaxed max-w-[280px] mx-auto">
-            Магия ИИ подбирает идеальный стиль на основе ваших черт.
-          </p>
+          <h1 className="text-3xl font-light tracking-tight text-white leading-tight">
+            {isMulti ? "Генерируем портреты..." : "Создаем ваш образ..."}
+          </h1>
+          {isMulti ? (
+            <p className="text-white/60 text-[15px] font-light leading-relaxed max-w-[280px] mx-auto">
+              Готово {progress.completed} из {progress.total}
+              {progress.failed > 0 && (
+                <span className="text-red-400/80"> ({progress.failed} с ошибкой)</span>
+              )}
+            </p>
+          ) : (
+            <p className="text-white/60 text-[15px] font-light leading-relaxed max-w-[280px] mx-auto">
+              Магия ИИ подбирает идеальный стиль на основе ваших черт.
+            </p>
+          )}
         </div>
 
         <div className="mt-16 w-full space-y-4">
@@ -83,15 +97,40 @@ export default function Processing() {
             <span className="text-white/90 font-medium text-[15px]">Анализируем фото</span>
           </div>
 
-          <div className="flex items-center gap-4 px-6 py-4 rounded-2xl bg-white/[0.03] border border-white/5 transition-all duration-500">
+          <div className={`flex items-center gap-4 px-6 py-4 rounded-2xl border transition-all duration-500 ${
+            progress.completed > 0 ? "bg-white/[0.05] border-white/10" : "bg-white/[0.03] border-white/5"
+          }`}>
             <div className="relative flex-shrink-0">
-              <div className="w-6 h-6 rounded-full border-2 border-white/10 border-t-[#c084fc] animate-spin"></div>
+              {progress.completed > 0 && (progress.completed + progress.failed) >= progress.total ? (
+                <div className="w-6 h-6 rounded-full bg-[#c084fc] flex items-center justify-center">
+                  <Check className="text-white w-4 h-4" />
+                </div>
+              ) : (
+                <div className="w-6 h-6 rounded-full border-2 border-white/10 border-t-[#c084fc] animate-spin"></div>
+              )}
             </div>
-            <span className="text-white/90 font-medium text-[15px]">Подбираем стиль</span>
-            <span className="ml-auto text-[#d8b4fe] text-[12px] font-medium">{progress}%</span>
+            <span className="text-white/90 font-medium text-[15px]">
+              {isMulti ? "Генерация изображений" : "Подбираем стиль"}
+            </span>
+            <span className="ml-auto text-[#d8b4fe] text-[12px] font-medium">{pct}%</span>
           </div>
 
-          <div className="flex items-center gap-4 px-6 py-4 rounded-2xl bg-white/[0.01] border border-white/5 transition-all duration-500 opacity-50">
+          {progress.failed > 0 && (
+            <div className="flex items-center gap-4 px-6 py-4 rounded-2xl bg-red-500/5 border border-red-500/10 transition-all duration-500">
+              <div className="relative flex-shrink-0">
+                <AlertTriangle className="w-5 h-5 text-red-400/70" />
+              </div>
+              <span className="text-red-400/80 font-medium text-[14px]">
+                {progress.failed} {progress.failed === 1 ? "изображение" : "изображений"} не удалось
+              </span>
+            </div>
+          )}
+
+          <div className={`flex items-center gap-4 px-6 py-4 rounded-2xl border transition-all duration-500 ${
+            (progress.completed + progress.failed) >= progress.total
+              ? "bg-white/[0.05] border-white/10"
+              : "bg-white/[0.01] border-white/5 opacity-50"
+          }`}>
             <div className="relative flex-shrink-0">
               <div className="w-6 h-6 rounded-full border border-white/20 flex items-center justify-center">
                 <div className="w-1.5 h-1.5 rounded-full bg-white/20"></div>

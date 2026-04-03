@@ -1,9 +1,12 @@
 import { Telegraf, Markup } from "telegraf";
-import { aiProvider } from "./ai.js";
 import { storage } from "./storage.js";
 import { getDb } from "./db.js";
 import { v4 as uuidv4 } from "uuid";
-import { buildPrompt, PromptType, StyleId } from "./prompts.js";
+import { buildPrompt, StyleId } from "./prompts.js";
+import { PACKAGES, buildStyleSchedule, runBatched } from "./packages.js";
+import { aiProvider } from "./ai.js";
+
+let botInstance: Telegraf | null = null;
 
 export function initTelegramBot() {
   const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -13,6 +16,7 @@ export function initTelegramBot() {
   }
 
   const bot = new Telegraf(token);
+  botInstance = bot;
 
   bot.start((ctx) => {
     const webAppUrl = process.env.APP_URL || "https://myaura.by";
@@ -94,4 +98,62 @@ export function initTelegramBot() {
   // Enable graceful stop
   process.once("SIGINT", () => bot.stop("SIGINT"));
   process.once("SIGTERM", () => bot.stop("SIGTERM"));
+}
+
+/**
+ * Delivers a single photo progressively during generation.
+ * Called as each image completes, so user sees results immediately.
+ */
+export async function deliverTelegramPhoto(chatId: number, resultPath: string, caption?: string) {
+  if (!botInstance) return;
+  try {
+    const publicBaseUrl = process.env.R2_PUBLIC_BASE_URL || "";
+    const url = `${publicBaseUrl}/${resultPath}`;
+    await botInstance.telegram.sendPhoto(chatId, url, { caption });
+  } catch (error) {
+    console.error(`Failed to deliver progressive photo to Telegram chat ${chatId}:`, error);
+  }
+}
+
+/**
+ * Delivers generated results back to a Telegram chat (batch).
+ * Used as fallback or for final delivery summary.
+ */
+export async function deliverTelegramResults(chatId: number, resultPaths: string[]) {
+  console.log(`Attempting Telegram delivery to chat ${chatId}, ${resultPaths.length} image(s)`);
+  if (!botInstance) { console.warn("Telegram delivery skipped: bot not initialized"); return; }
+  if (resultPaths.length === 0) { console.warn("Telegram delivery skipped: no result paths"); return; }
+  
+  try {
+    const publicBaseUrl = process.env.R2_PUBLIC_BASE_URL || "";
+    
+    // For single output (free)
+    if (resultPaths.length === 1) {
+      const url = `${publicBaseUrl}/${resultPaths[0]}`;
+      await botInstance.telegram.sendPhoto(chatId, url, { caption: "Your portrait is ready!" });
+      return;
+    }
+    
+    // For multiple outputs (starter, signature, premium)
+    // Telegram restricts media groups to 10 items max. We must chunk them.
+    const MAX_GROUP_SIZE = 10;
+    
+    for (let i = 0; i < resultPaths.length; i += MAX_GROUP_SIZE) {
+      const chunk = resultPaths.slice(i, i + MAX_GROUP_SIZE);
+      const mediaGroup = chunk.map((path, index) => {
+        const url = `${publicBaseUrl}/${path}`;
+        // Add caption only to the first item in the first group
+        const caption = (i === 0 && index === 0) ? "Your premium portraits are ready! ✨" : undefined;
+        return {
+          type: 'photo' as const,
+          media: url,
+          caption
+        };
+      });
+      
+      await botInstance.telegram.sendMediaGroup(chatId, mediaGroup);
+    }
+  } catch (error) {
+    console.error(`Failed to deliver results to Telegram chat ${chatId}:`, error);
+  }
 }

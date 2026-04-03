@@ -1,5 +1,28 @@
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 
+// Database row types for the 'generations' table
+export interface GenerationRow {
+  id: string;
+  user_id: string;
+  type: "free" | "premium"; // Legacy field
+  package_id: "free" | "starter" | "signature" | "premium";
+  status: "processing" | "completed" | "failed" | "partial";
+  original_path: string | null; // Legacy field
+  reference_paths: string[]; // New array format
+  result_path: string | null; // Legacy field
+  result_paths: string[]; // New array format
+  prompt_preset: string | null; // Legacy field
+  style_ids: string[]; // New array format
+  results_completed: number;
+  results_failed: number;
+  results_total: number;
+  error_message: string | null;
+  expires_at: string; // ISO timestamp
+  telegram_chat_id: number | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
 let supabase: SupabaseClient;
 
 export function initDb() {
