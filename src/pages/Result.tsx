@@ -122,23 +122,17 @@ export default function Result() {
           )}
           
           <div className="flex items-center gap-2">
-            <Send className="text-white/40 w-4 h-4" />
-            <p className="text-[12px] font-light text-white/50">
-              Результат также отправлен в Telegram
+            <Send className="text-[#d8b4fc] w-4 h-4" />
+            <p className="text-[12px] font-light text-[#d8b4fc]/90">
+              ✅ Фото также отправлено в ваш Telegram-чат!
             </p>
           </div>
         </div>
 
-        <div className="w-full mt-10 grid grid-cols-2 gap-3">
-          <Link to="/upload" className="bg-white/[0.03] border border-white/5 p-4 rounded-2xl flex flex-col items-center justify-center gap-2 hover:bg-white/[0.05] transition-colors cursor-pointer group">
-            <Wand2 className="text-[#d8b4fe] w-5 h-5" />
-            <span className="text-[12px] font-medium text-white/70 group-hover:text-white transition-colors">Изменить стиль</span>
-          </Link>
-          <a href={urls[0] || "#"} download="myaura-result.jpg" className="bg-white/[0.03] border border-white/5 p-4 rounded-2xl flex flex-col items-center justify-center gap-2 hover:bg-white/[0.05] transition-colors cursor-pointer group">
-            <Download className="text-[#d8b4fe] w-5 h-5" />
-            <span className="text-[12px] font-medium text-white/70 group-hover:text-white transition-colors">Сохранить</span>
-          </a>
-        </div>
+        <Link to="/upload" className="w-full mt-10 bg-white/[0.03] border border-white/5 p-4 rounded-2xl flex flex-col items-center justify-center gap-2 hover:bg-white/[0.05] transition-colors cursor-pointer group">
+          <Wand2 className="text-[#d8b4fe] w-5 h-5" />
+          <span className="text-[12px] font-medium text-white/70 group-hover:text-white transition-colors">Изменить стиль</span>
+        </Link>
       </main>
 
       <nav className="fixed bottom-0 left-0 w-full flex justify-around items-center px-6 pb-8 pt-4 bg-black/80 backdrop-blur-xl border-t border-white/5 z-50">

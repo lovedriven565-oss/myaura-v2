@@ -13,6 +13,7 @@ export default function Processing() {
   const navigate = useNavigate();
   const [progress, setProgress] = useState<ProgressData>({ completed: 0, failed: 0, total: 1 });
   const [status, setStatus] = useState<string>("processing");
+  const [etaText, setEtaText] = useState<string | null>(null);
 
   useEffect(() => {
     const poll = setInterval(async () => {
@@ -24,6 +25,7 @@ export default function Processing() {
           setProgress(data.progress);
         }
         setStatus(data.status);
+        setEtaText(data.etaText ?? null);
 
         if (data.status === "completed" || data.status === "partial") {
           clearInterval(poll);
@@ -74,12 +76,20 @@ export default function Processing() {
             {isMulti ? "Генерируем портреты..." : "Создаем ваш образ..."}
           </h1>
           {isMulti ? (
-            <p className="text-white/60 text-[15px] font-light leading-relaxed max-w-[280px] mx-auto">
-              Готово {progress.completed} из {progress.total}
-              {progress.failed > 0 && (
-                <span className="text-red-400/80"> ({progress.failed} с ошибкой)</span>
-              )}
-            </p>
+            <>
+              <p className="text-white/60 text-[15px] font-light leading-relaxed max-w-[280px] mx-auto">
+                Готово {progress.completed} из {progress.total}
+                {progress.failed > 0 && (
+                  <span className="text-red-400/80"> ({progress.failed} с ошибкой)</span>
+                )}
+              </p>
+              <p className="text-[#c084fc]/80 text-[14px] font-light">
+                Осталось примерно {etaText ?? "несколько минут"}
+              </p>
+              <p className="text-white/35 text-[12px] font-light max-w-[260px] mx-auto leading-relaxed">
+                Фото приходят постепенно — первые результаты могут появиться раньше
+              </p>
+            </>
           ) : (
             <p className="text-white/60 text-[15px] font-light leading-relaxed max-w-[280px] mx-auto">
               Магия ИИ подбирает идеальный стиль на основе ваших черт.

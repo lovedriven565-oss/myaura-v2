@@ -1,6 +1,6 @@
 import { PromptType, StyleId } from "./prompts.js";
 
-export type PackageId = "free" | "starter" | "signature" | "premium";
+export type PackageId = "free" | "starter" | "pro" | "max";
 
 export interface PackageConfig {
   id: PackageId;
@@ -28,28 +28,28 @@ export const PACKAGES: Record<PackageId, PackageConfig> = {
     id: "starter",
     minRefs: 10,
     maxRefs: 15,
-    outputCount: 5,
+    outputCount: 7,
     maxStyles: 1,
     promptTier: "premium",
     retentionEnvKey: "RETENTION_PREMIUM_REF_MINUTES",
-    retentionDefault: 4320, // 3 days
+    retentionDefault: 4320,
   },
-  signature: {
-    id: "signature",
+  pro: {
+    id: "pro",
     minRefs: 10,
     maxRefs: 15,
-    outputCount: 10,
+    outputCount: 25,
     maxStyles: 3,
     promptTier: "premium",
     retentionEnvKey: "RETENTION_PREMIUM_REF_MINUTES",
     retentionDefault: 4320,
   },
-  premium: {
-    id: "premium",
+  max: {
+    id: "max",
     minRefs: 10,
     maxRefs: 15,
-    outputCount: 15,
-    maxStyles: 6, // Or whatever the total available styles is
+    outputCount: 60,
+    maxStyles: 6,
     promptTier: "premium",
     retentionEnvKey: "RETENTION_PREMIUM_REF_MINUTES",
     retentionDefault: 4320,
@@ -91,8 +91,13 @@ export function validatePackageInput(
 
 // Distributes requested styles evenly across the output count
 export function buildStyleSchedule(config: PackageConfig, styleIds: StyleId[]): StyleId[] {
+  return buildStyleScheduleWithCount(config, styleIds, config.outputCount);
+}
+
+// Same as buildStyleSchedule but with custom count
+export function buildStyleScheduleWithCount(config: PackageConfig, styleIds: StyleId[], count: number): StyleId[] {
   const schedule: StyleId[] = [];
-  const total = config.outputCount;
+  const total = count;
   
   // If no styles provided (fallback), just use business
   if (!styleIds || styleIds.length === 0) {

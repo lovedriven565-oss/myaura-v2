@@ -1,14 +1,31 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useNavigate, Link } from "react-router-dom";
-import { Camera, X, Sparkles, Star, Check, Crown, Image as ImageIcon, ShieldCheck, ArrowRight } from "lucide-react";
+import { Camera, X, Sparkles, Star, Check, Crown, Image as ImageIcon, ShieldCheck, ArrowRight, Wallet, Zap } from "lucide-react";
 
-// Detect Telegram Mini App chat ID for delivery
-function getTelegramChatId(): string | null {
+// Detect Telegram Mini App IDs for delivery
+function getTelegramIds(): { chatId: string | null; userId: string | null } {
   try {
     const tg = (window as any).Telegram?.WebApp;
+    if (tg) tg.ready();
+    if (!tg) return { chatId: null, userId: null };
     const userId = tg?.initDataUnsafe?.user?.id;
-    return userId ? String(userId) : null;
-  } catch { return null; }
+    const explicitChatId = tg?.initDataUnsafe?.chat?.id;
+    return {
+      chatId: explicitChatId ? String(explicitChatId) : null,
+      userId: userId ? String(userId) : null
+    };
+  } catch {
+    return { chatId: null, userId: null };
+  }
+}
+
+interface CatalogPkg {
+  id: string;
+  title: string;
+  generations: number;
+  priceBYN: number;
+  starsPrice: number;
+  badge: string | null;
 }
 
 const PREMIUM_STYLES = [
@@ -20,27 +37,53 @@ const PREMIUM_STYLES = [
   { id: "aura", name: "Aura", desc: "Фирменный стиль с мягким свечением" }
 ];
 
-const PACKAGES = [
-  { id: "starter", name: "Starter", photos: "5 HD фото", styles: "1 стиль", recommended: false },
-  { id: "signature", name: "Signature", photos: "10 HD фото", styles: "2–3 стиля", recommended: true },
-  { id: "premium", name: "Premium", photos: "15 HD фото", styles: "Максимальная вариативность", recommended: false }
-];
-
 export default function UploadPremium() {
   const [files, setFiles] = useState<File[]>([]);
   const [selectedStyle, setSelectedStyle] = useState("business");
-  const [selectedPackage, setSelectedPackage] = useState("signature");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [warning, setWarning] = useState("");
   const [agreed, setAgreed] = useState(false);
-  const [showPayment, setShowPayment] = useState(false);
+  const [showStore, setShowStore] = useState(false);
+  const [freeCredits, setFreeCredits] = useState(0);
+  const [paidCredits, setPaidCredits] = useState(0);
+  const [balanceLoading, setBalanceLoading] = useState(true);
+  const [catalog, setCatalog] = useState<CatalogPkg[]>([]);
+  const [selectedStorePkg, setSelectedStorePkg] = useState("pro");
+  const [confirmedPackageId, setConfirmedPackageId] = useState<string | null>(null);
   const navigate = useNavigate();
+  const { userId: tgUserId } = getTelegramIds();
+
+  // Premium HD: ONLY paid credits count. Free credits are for Preview only.
+  const canGenerate = paidCredits > 0;
+  // Resolved from catalog only after explicit confirmation in modal — the ONLY package used for generation
+  const confirmedPkg = catalog.find(p => p.id === confirmedPackageId) ?? null;
+
+  // Fetch balance on mount
+  useEffect(() => {
+    const fetchBalance = async () => {
+      try {
+        const url = tgUserId ? `/api/user/balance?telegramId=${tgUserId}` : `/api/user/balance`;
+        const res = await fetch(url);
+        const data = await res.json();
+        setFreeCredits(data.freeCredits ?? 0);
+        setPaidCredits(data.paidCredits ?? 0);
+      } catch {
+        setFreeCredits(1);
+        setPaidCredits(0);
+      } finally {
+        setBalanceLoading(false);
+      }
+    };
+    fetchBalance();
+  }, [tgUserId]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
       const newFiles = Array.from(e.target.files);
-      setFiles(prev => [...prev, ...newFiles].slice(0, 15)); // Max 15 files
+      setFiles(prev => [...prev, ...newFiles].slice(0, 15));
       setError("");
+      setWarning("");
     }
   };
 
@@ -48,49 +91,142 @@ export default function UploadPremium() {
     setFiles(prev => prev.filter((_, i) => i !== index));
   };
 
-  const handlePaymentAndUpload = async () => {
-    if (files.length < 10) { // Enforce 10-15 images for premium quality
-      setError("Пожалуйста, загрузите от 10 до 15 фото для достижения высокого качества");
+  // Open store and fetch catalog
+  const openStore = async () => {
+    try {
+      const res = await fetch("/api/payment/catalog");
+      const data = await res.json();
+      setCatalog(data.catalog || []);
+      setShowStore(true);
+    } catch {
+      setError("Не удалось загрузить каталог");
+    }
+  };
+
+  // Purchase via Telegram Stars
+  const handlePurchase = async (pkgId: string) => {
+    const tg = (window as any).Telegram?.WebApp;
+    if (!tg || !tgUserId) {
+      setError("Оплата доступна только внутри Telegram");
       return;
+    }
+    try {
+      const res = await fetch("/api/payment/create-invoice", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ packageId: pkgId, telegramId: tgUserId }),
+      });
+      const data = await res.json();
+      if (data.invoiceLink) {
+        tg.openInvoice(data.invoiceLink, (status: string) => {
+          if (status === "paid") {
+            fetch(`/api/user/balance?telegramId=${tgUserId}`)
+              .then(r => r.json())
+              .then(d => {
+                setFreeCredits(d.freeCredits ?? 0);
+                setPaidCredits(d.paidCredits ?? 0);
+                setShowStore(false);
+              });
+          }
+        });
+      }
+    } catch {
+      setError("Ошибка при создании инвойса");
+    }
+  };
+
+  const handleMainAction = async () => {
+    // Double-click / re-entry guard
+    if (loading) return;
+
+    if (!canGenerate) {
+      openStore();
+      return;
+    }
+
+    // Credits exist but no package explicitly confirmed yet.
+    // Package selection is the ONLY source of generation size — credits are payment substitute only.
+    if (!confirmedPackageId) {
+      openStore();
+      return;
+    }
+
+    // Non-blocking warning: recommend 10+ photos but allow proceed with 8+
+    if (files.length < 10) {
+      setWarning(`Рекомендуется 10–15 фото для стабильного результата (загружено ${files.length}). Можно продолжить, но качество может быть ниже.`);
+    } else {
+      setWarning("");
     }
     if (!agreed) {
       setError("Необходимо согласие с условиями");
       return;
     }
 
-    setShowPayment(true);
-  };
-
-  const confirmPayment = async () => {
     setLoading(true);
-    setShowPayment(false);
     setError("");
+    setWarning("");
+
+    const { chatId, userId } = getTelegramIds();
+
+    if (!userId) {
+      setError("Откройте приложение через Telegram для генерации");
+      setLoading(false);
+      return;
+    }
 
     const formData = new FormData();
     files.forEach(file => formData.append("images", file));
-    formData.append("packageId", selectedPackage);
+    // confirmedPackageId is guaranteed non-null here (guarded above)
+    formData.append("packageId", confirmedPackageId!);
+    formData.append("mode", "premium");
     formData.append("styleIds", JSON.stringify([selectedStyle]));
-    const chatId = getTelegramChatId();
+    formData.append("telegramUserId", userId);
     if (chatId) formData.append("telegramChatId", chatId);
 
     try {
+      const tg = (window as any).Telegram?.WebApp;
       const res = await fetch("/api/generate", {
         method: "POST",
+        headers: { "X-Telegram-Init-Data": tg?.initData || "" },
         body: formData,
       });
       const data = await res.json();
 
-      if (!res.ok) throw new Error(data.error || "Ошибка загрузки");
+      if (res.status === 403 && data.code === "INSUFFICIENT_FUNDS") {
+        setError("У вас недостаточно оплаченных генераций. Купите пакет, чтобы продолжить!");
+        openStore();
+        setLoading(false);
+        return;
+      }
+
+      if (res.status === 404 && data.code === "USER_NOT_FOUND") {
+        setError("Пользователь не найден. Перезапустите приложение.");
+        setLoading(false);
+        return;
+      }
+
+      if (!res.ok) throw new Error("Произошла ошибка при генерации. Попробуйте ещё раз.");
 
       navigate(`/processing/${data.id}`);
     } catch (err: any) {
-      setError(err.message);
+      setError(err.message || "Произошла ошибка. Попробуйте ещё раз.");
       setLoading(false);
     }
   };
 
   return (
     <div className="min-h-screen flex flex-col bg-[#0a0a0a] text-white font-sans selection:bg-purple-500/30">
+      {/* Loading Overlay */}
+      {loading && (
+        <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-sm flex items-center justify-center">
+          <div className="text-center space-y-4">
+            <div className="w-16 h-16 border-4 border-[#c084fc] border-t-transparent rounded-full animate-spin mx-auto"></div>
+            <h2 className="text-2xl font-light text-white">Генерируем фотографии...</h2>
+            <p className="text-white/60 text-[15px]">Это может занять несколько минут</p>
+          </div>
+        </div>
+      )}
+      
       <header className="fixed top-0 w-full z-50 bg-black/40 backdrop-blur-xl border-b border-white/5 flex items-center justify-between px-6 h-16">
         <div className="flex items-center gap-2">
           <Crown className="text-[#d8b4fe] w-5 h-5" />
@@ -108,6 +244,34 @@ export default function UploadPremium() {
             Загрузи 10–15 фото, выбери стиль и получи набор HD-портретов с более сильным likeness, дорогой постановкой света и премиальным результатом.
           </p>
         </section>
+
+        {/* Balance Badge */}
+        <div className="mb-8 flex justify-center">
+          {balanceLoading ? (
+            <div className="px-4 py-2 rounded-full bg-white/5 border border-white/10 text-[13px] text-white/40">Загрузка баланса...</div>
+          ) : (
+            <div className="flex flex-col items-center gap-1.5">
+              <div className={`px-5 py-2.5 rounded-full border flex items-center gap-2.5 ${canGenerate ? 'bg-[#c084fc]/10 border-[#c084fc]/30' : 'bg-red-500/10 border-red-500/30'}`}>
+                <Wallet className={`w-4 h-4 ${canGenerate ? 'text-[#c084fc]' : 'text-red-400'}`} />
+                <span className={`text-[13px] font-medium ${canGenerate ? 'text-[#e9d5ff]' : 'text-red-300'}`}>
+                  {paidCredits > 0
+                    ? `Баланс: ${paidCredits} генераций`
+                    : "Нет оплаченных генераций"}
+                </span>
+                {!canGenerate && (
+                  <button onClick={openStore} className="text-[11px] text-[#c084fc] underline underline-offset-2 ml-1">Купить</button>
+                )}
+              </div>
+              {canGenerate && confirmedPkg && (
+                <div className="text-[12px] text-white/50">
+                  Пакет: <span className="text-[#e9d5ff]">{confirmedPkg.title} · {confirmedPkg.generations} фото</span>
+                  {' · '}
+                  <button onClick={openStore} className="text-[#c084fc] underline underline-offset-2">Изменить</button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
 
         <div className="mb-10">
           <div className="flex items-center justify-between mb-4">
@@ -137,15 +301,26 @@ export default function UploadPremium() {
           </div>
           
           <div className="bg-white/[0.02] border border-white/10 rounded-3xl p-5 mb-4">
-            <ul className="space-y-2 mb-5">
-              <li className="flex items-center gap-3 text-[13px] text-white/70">
-                <Check className="w-4 h-4 text-[#c084fc]" /> Только портреты и селфи
+            <ul className="space-y-2.5 mb-5">
+              <li className="flex items-start gap-3 text-[13px] text-white/70">
+                <Check className="w-4 h-4 text-[#c084fc] shrink-0 mt-0.5" />
+                <span>Только портреты и селфи — лицо чётко видно, без групповых фото</span>
               </li>
-              <li className="flex items-center gap-3 text-[13px] text-white/70">
-                <Check className="w-4 h-4 text-[#c084fc]" /> Разные ракурсы и освещение
+              <li className="flex items-start gap-3 text-[13px] text-white/70">
+                <Check className="w-4 h-4 text-[#c084fc] shrink-0 mt-0.5" />
+                <span>2–3 фото с разных ракурсов: прямо, вполоборота, чуть сбоку</span>
               </li>
-              <li className="flex items-center gap-3 text-[13px] text-white/70">
-                <Check className="w-4 h-4 text-[#c084fc]" /> Без очков и сильного макияжа
+              <li className="flex items-start gap-3 text-[13px] text-white/70">
+                <Check className="w-4 h-4 text-[#c084fc] shrink-0 mt-0.5" />
+                <span>Разное освещение: дневной свет, тёплый интерьер, вечер</span>
+              </li>
+              <li className="flex items-start gap-3 text-[13px] text-white/70">
+                <Check className="w-4 h-4 text-[#c084fc] shrink-0 mt-0.5" />
+                <span>Нейтральное выражение и мягкая улыбка — по 1–2 фото каждого</span>
+              </li>
+              <li className="flex items-start gap-3 text-[13px] text-white/70">
+                <Check className="w-4 h-4 text-[#c084fc] shrink-0 mt-0.5" />
+                <span>Без очков, масок, сильного макияжа и фильтров — нужно естественное лицо</span>
               </li>
             </ul>
 
@@ -175,39 +350,8 @@ export default function UploadPremium() {
           )}
         </div>
 
-        <div className="mb-10">
-          <h2 className="text-[13px] font-medium tracking-widest uppercase text-white/50 mb-4">Пакеты</h2>
-          <div className="space-y-3">
-            {PACKAGES.map((pkg) => (
-              <div 
-                key={pkg.id}
-                onClick={() => setSelectedPackage(pkg.id)}
-                className={`relative p-5 rounded-2xl border cursor-pointer transition-all duration-300 flex items-center justify-between ${selectedPackage === pkg.id ? 'border-[#c084fc] bg-[#c084fc]/10 shadow-[0_0_20px_rgba(192,132,252,0.1)]' : 'border-white/10 bg-white/[0.02] hover:bg-white/[0.04]'}`}
-              >
-                {pkg.recommended && (
-                  <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-1 bg-gradient-to-r from-[#c084fc] to-[#a855f7] rounded-full text-[10px] font-bold tracking-wider uppercase text-white shadow-lg">
-                    Лучший выбор
-                  </div>
-                )}
-                <div>
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className={`font-medium text-[16px] ${selectedPackage === pkg.id ? 'text-[#e9d5ff]' : 'text-white/90'}`}>{pkg.name}</span>
-                  </div>
-                  <div className="flex items-center gap-3 text-[13px] text-white/50">
-                    <span className="flex items-center gap-1"><ImageIcon className="w-3 h-3" /> {pkg.photos}</span>
-                    <span className="w-1 h-1 rounded-full bg-white/20"></span>
-                    <span className="flex items-center gap-1"><Sparkles className="w-3 h-3" /> {pkg.styles}</span>
-                  </div>
-                </div>
-                <div className={`w-6 h-6 rounded-full border flex items-center justify-center ${selectedPackage === pkg.id ? 'border-[#c084fc] bg-[#c084fc]' : 'border-white/20'}`}>
-                  {selectedPackage === pkg.id && <Check className="w-4 h-4 text-white" />}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
         {error && <div className="text-red-400 text-[13px] mb-6 text-center bg-red-400/10 py-3 rounded-xl border border-red-400/20">{error}</div>}
+        {warning && <div className="text-amber-400 text-[13px] mb-6 text-center bg-amber-400/10 py-3 rounded-xl border border-amber-400/20">{warning}</div>}
 
         <div className="mt-auto space-y-6">
           <div className="bg-white/[0.02] border border-white/5 rounded-2xl p-4">
@@ -228,37 +372,92 @@ export default function UploadPremium() {
           </div>
 
           <button 
-            onClick={handlePaymentAndUpload}
-            disabled={loading}
+            onClick={handleMainAction}
+            disabled={loading || balanceLoading}
             className="w-full h-14 bg-gradient-to-r from-[#c084fc] to-[#a855f7] text-white font-medium text-[15px] rounded-2xl shadow-[0_0_30px_rgba(168,85,247,0.3)] hover:shadow-[0_0_40px_rgba(168,85,247,0.4)] active:scale-[0.98] transition-all duration-200 flex items-center justify-center gap-2 disabled:opacity-50 disabled:active:scale-100"
           >
-            <span>{loading ? "Загрузка..." : "Продолжить"}</span>
-            {!loading && <ArrowRight className="w-4 h-4 ml-1" />}
+            {loading ? (
+              <span>Генерация...</span>
+            ) : canGenerate && confirmedPkg ? (
+              <>
+                <Zap className="w-4 h-4" />
+                <span>Использовать 1 кредит · {confirmedPkg.generations} фото</span>
+              </>
+            ) : canGenerate && !confirmedPkg ? (
+              <>
+                <Star className="w-4 h-4" />
+                <span>Выбрать пакет →</span>
+              </>
+            ) : (
+              <>
+                <Star className="w-4 h-4" />
+                <span>Купить пакет (от 150 ⭐️)</span>
+              </>
+            )}
           </button>
         </div>
+
+        <p className="text-center text-[10px] text-white/20 mt-6">v3.1 Premium</p>
       </main>
 
-      {/* Payment Placeholder Modal */}
-      {showPayment && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-5 bg-black/80 backdrop-blur-sm">
-          <div className="bg-[#141414] rounded-3xl p-6 w-full max-w-sm shadow-2xl border border-white/10">
-            <h3 className="text-xl font-medium mb-2 text-white">Подтверждение</h3>
-            <p className="text-[14px] text-white/60 mb-6 font-light">Выбран пакет <strong>{PACKAGES.find(p => p.id === selectedPackage)?.name}</strong>. В реальном приложении здесь будет интеграция с платежным шлюзом (Telegram Stars).</p>
-            
-            <div className="space-y-3">
-              <button 
-                onClick={confirmPayment}
-                className="w-full h-12 bg-gradient-to-r from-[#c084fc] to-[#a855f7] text-white font-medium rounded-xl hover:opacity-90 transition-opacity"
-              >
-                Симулировать оплату
-              </button>
-              <button 
-                onClick={() => setShowPayment(false)}
-                className="w-full h-12 bg-white/5 border border-white/10 text-white font-medium rounded-xl hover:bg-white/10 transition-colors"
-              >
-                Отмена
+      {/* Store Modal */}
+      {showStore && (
+        <div className="fixed inset-0 z-[100] flex items-end sm:items-center justify-center bg-black/80 backdrop-blur-sm">
+          <div className="bg-[#141414] rounded-t-3xl sm:rounded-3xl p-6 w-full max-w-sm shadow-2xl border border-white/10 max-h-[85vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-5">
+              <h3 className="text-xl font-medium text-white">{canGenerate ? 'Выбрать пакет' : 'Купить генерации'}</h3>
+              <button onClick={() => setShowStore(false)} className="text-white/40 hover:text-white transition-colors">
+                <X className="w-5 h-5" />
               </button>
             </div>
+
+            <div className="space-y-3 mb-5">
+              {catalog.map((pkg) => (
+                <div
+                  key={pkg.id}
+                  onClick={() => setSelectedStorePkg(pkg.id)}
+                  className={`relative p-4 rounded-2xl border cursor-pointer transition-all duration-200 ${
+                    selectedStorePkg === pkg.id
+                      ? 'border-[#c084fc] bg-[#c084fc]/10 shadow-[0_0_15px_rgba(192,132,252,0.1)]'
+                      : 'border-white/10 bg-white/[0.02] hover:bg-white/[0.04]'
+                  }`}
+                >
+                  {pkg.badge && (
+                    <div className="absolute -top-2.5 left-1/2 -translate-x-1/2 px-3 py-0.5 bg-gradient-to-r from-[#c084fc] to-[#a855f7] rounded-full text-[9px] font-bold tracking-wider uppercase text-white">
+                      {pkg.badge}
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <span className="font-medium text-[15px] text-white">{pkg.title}</span>
+                      <p className="text-[12px] text-white/50 mt-0.5">+{pkg.generations} фото</p>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-[16px] font-semibold text-white">{pkg.priceBYN} BYN</div>
+                      <div className="text-[14px] font-medium text-[#c084fc] mt-1">{pkg.starsPrice} ⭐️</div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {canGenerate ? (
+              <button
+                onClick={() => { setConfirmedPackageId(selectedStorePkg); setShowStore(false); }}
+                className="w-full h-12 bg-gradient-to-r from-[#c084fc] to-[#a855f7] text-white font-medium rounded-xl hover:opacity-90 transition-opacity flex items-center justify-center gap-2"
+              >
+                <Zap className="w-4 h-4" />
+                <span>Использовать 1 кредит · {catalog.find(p => p.id === selectedStorePkg)?.generations ?? ''} фото</span>
+              </button>
+            ) : (
+              <button
+                onClick={() => handlePurchase(selectedStorePkg)}
+                className="w-full h-12 bg-gradient-to-r from-[#c084fc] to-[#a855f7] text-white font-medium rounded-xl hover:opacity-90 transition-opacity flex items-center justify-center gap-2"
+              >
+                <Star className="w-4 h-4" />
+                <span>Оплатить {catalog.find(p => p.id === selectedStorePkg)?.starsPrice || ''} ⭐️</span>
+              </button>
+            )}
           </div>
         </div>
       )}

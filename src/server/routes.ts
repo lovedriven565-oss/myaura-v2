@@ -5,8 +5,10 @@ import { getDb } from "./db.js";
 import { storage } from "./storage.js";
 import { aiProvider } from "./ai.js";
 import { buildPrompt, StyleId } from "./prompts.js";
-import { validatePackageInput, buildStyleSchedule, runBatched, getGenerationConfig } from "./packages.js";
-import { deliverTelegramPhoto } from "./telegram.js";
+import { validatePackageInput, buildStyleSchedule, buildStyleScheduleWithCount, runBatched, getGenerationConfig, PACKAGES } from "./packages.js";
+import { deliverTelegramPhoto, deliverTelegramResults } from "./telegram.js";
+import { selectBestReferencePhotos } from "./inputCuration.js";
+import { evaluateGeneratedPhoto, clearRerollTracking } from "./qualityGate.js";
 
 export const apiRouter = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB limit per file
@@ -29,25 +31,34 @@ function isValidImageBuffer(buf: Buffer, declaredMime: string): boolean {
 }
 
 // 1. Upload & Start Generation (Supports single file for 'free' and multiple for 'premium')
-apiRouter.post("/generate", upload.array("images", 15), async (req, res, next) => {
-  try {
-    const files = req.files as Express.Multer.File[];
-    if (!files || files.length === 0) {
-      return res.status(400).json({ error: "No images provided", code: "MISSING_IMAGE" });
-    }
-
-    // Validate all uploaded files are real images
-    for (const file of files) {
-      if (!isValidImageBuffer(file.buffer, file.mimetype)) {
+apiRouter.post("/generate", 
+  upload.fields([{ name: "images", maxCount: 15 }]),
+  async (req, res, next) => {
+    try {
+      // MANDATORY: Log raw request body
+      console.log("RAW REQ BODY:", req.body);
+      
+      // SAFETY CHECK: Handle both single file and multiple files
+      const imageFiles = req.files?.images as Express.Multer.File[];
+      
+      if (!imageFiles || imageFiles.length === 0) {
         return res.status(400).json({ 
-          error: `Invalid image file: ${file.originalname}. Supported formats: JPEG, PNG, WebP, HEIC.`, 
-          code: "INVALID_IMAGE" 
+          error: "No image files provided. Please upload at least one image.", 
+          code: "NO_FILES" 
         });
       }
-    }
+      
+      // Validate images
+      for (const file of imageFiles) {
+        if (!isValidImageBuffer(file.buffer, file.mimetype)) {
+          return res.status(400).json({ 
+            error: `Invalid image file: ${file.originalname}. Supported formats: JPEG, PNG, WebP, HEIC.`, 
+            code: "INVALID_IMAGE" 
+          });
+        }
+      }
 
-    const { type, preset } = req.body; // legacy 'type' and 'preset'
-    const packageId = req.body.packageId || type || "free";
+    const packageId = req.body.packageId || "free";
     
     // Parse styleIds (could be JSON string array or a single string)
     let styleIds: string[] = [];
@@ -57,24 +68,24 @@ apiRouter.post("/generate", upload.array("images", 15), async (req, res, next) =
       } catch (e) {
         styleIds = Array.isArray(req.body.styleIds) ? req.body.styleIds : [req.body.styleIds];
       }
-    } else if (preset) {
-      styleIds = [preset]; // legacy fallback
     }
 
     // Validate using packages logic
-    const validation = validatePackageInput(packageId, files.length, styleIds);
+    const validation = validatePackageInput(packageId, imageFiles.length, styleIds);
     if (!validation.ok || !validation.config) {
       return res.status(400).json({ error: validation.error, code: validation.code });
     }
     const config = validation.config;
     
     const id = uuidv4();
-    const userId = req.headers["x-user-id"] || "anonymous";
+    // outputCount is always server-authoritative from package config — never trusted from client
+    const outputCount = config.outputCount;
+    console.log(`[${id}] New generation request: packageId=${packageId}, mode=${req.body.mode}, outputCount=${outputCount}, files=${imageFiles.length}, styles=${styleIds}`);
 
     // Save originals
     const originalPaths: string[] = [];
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
+    for (let i = 0; i < imageFiles.length; i++) {
+      const file = imageFiles[i];
       const path = await storage.save(file.buffer, `${id}_${i}_${file.originalname}`, "original");
       originalPaths.push(path);
     }
@@ -87,16 +98,81 @@ apiRouter.post("/generate", upload.array("images", 15), async (req, res, next) =
     
     // Check if this was triggered from Telegram
     let telegramChatId: number | null = null;
+    let telegramUserId: number | null = null;
+    
+    // Try to get explicit chat_id (attachment menu context)
     if (req.body.telegramChatId) {
       const parsed = parseInt(req.body.telegramChatId, 10);
       telegramChatId = isNaN(parsed) ? null : parsed;
+    }
+    
+    // Always get user_id from Telegram SDK
+    if (req.body.telegramUserId) {
+      const parsed = parseInt(req.body.telegramUserId, 10);
+      telegramUserId = isNaN(parsed) ? null : parsed;
+    }
+
+    // STRICT: Block generation if no Telegram user ID
+    if (!telegramUserId) {
+      return res.status(401).json({ error: "Telegram user ID is required", code: "NO_USER_ID" });
+    }
+    
+    console.log(`Generation ${id}: telegram context - chatId=${telegramChatId}, userId=${telegramUserId}`);
+
+    // ─── Strict Credits Consumption: 1 photo = 1 credit ───────────────
+    // mode: 'premium' = only paid_credits; 'preview' = free first, then paid
+    const mode: "premium" | "preview" = (req.body.mode === "premium") ? "premium" : "preview";
+
+    if (telegramUserId) {
+      const { data: user, error: userError } = await db
+        .from("users")
+        .select("free_credits, paid_credits")
+        .eq("telegram_id", telegramUserId)
+        .single();
+
+      if (userError || !user) {
+        return res.status(404).json({ error: "User not found", code: "USER_NOT_FOUND" });
+      }
+
+      let creditType: "free" | "paid" | null = null;
+
+      if (mode === "premium") {
+        // Premium HD: ONLY paid credits allowed
+        if ((user.paid_credits ?? 0) > 0) {
+          creditType = "paid";
+        }
+      } else {
+        // Preview: free first, then paid
+        if ((user.free_credits ?? 0) > 0) {
+          creditType = "free";
+        } else if ((user.paid_credits ?? 0) > 0) {
+          creditType = "paid";
+        }
+      }
+
+      if (!creditType) {
+        return res.status(403).json({ error: "Нет доступных генераций", code: "INSUFFICIENT_FUNDS" });
+      }
+
+      // Atomic decrement via RPC
+      const { error: consumeError } = await db.rpc("consume_credit", {
+        p_telegram_id: telegramUserId,
+        p_type: creditType,
+      });
+
+      if (consumeError) {
+        console.error("Credit consumption error:", consumeError);
+        return res.status(500).json({ error: "Failed to consume credit", code: "CREDIT_ERROR" });
+      }
+
+      console.log(`[${id}] Consumed 1 ${creditType} credit (mode=${mode}) from user ${telegramUserId}`);
     }
 
     const { error: insertError } = await db
       .from("generations")
       .insert({
         id,
-        user_id: userId,
+        user_id: String(telegramUserId),
         type: config.promptTier, // Legacy compat
         package_id: packageId,
         status: "processing",
@@ -104,10 +180,11 @@ apiRouter.post("/generate", upload.array("images", 15), async (req, res, next) =
         reference_paths: originalPaths,  // New array format
         prompt_preset: styleIds[0],      // Legacy compat
         style_ids: styleIds,             // New array format
-        results_total: config.outputCount,
+        results_total: outputCount,
         results_completed: 0,
         expires_at: expiresAt,
-        telegram_chat_id: telegramChatId
+        telegram_chat_id: telegramChatId,
+        telegram_user_id: telegramUserId
       });
 
     if (insertError) {
@@ -120,14 +197,39 @@ apiRouter.post("/generate", upload.array("images", 15), async (req, res, next) =
 
     // Background processing
     try {
-      const schedule = buildStyleSchedule(config, styleIds as StyleId[]);
+      const schedule = buildStyleScheduleWithCount(config, styleIds as StyleId[], outputCount);
       const genConfig = getGenerationConfig(config.id);
-      console.log(`Generation ${id}: ${schedule.length} images, concurrency=${genConfig.concurrency}, delay=${genConfig.delayMs}ms`);
+      console.log(`[${id}] Schedule: ${schedule.length} images, concurrency=${genConfig.concurrency}, delay=${genConfig.delayMs}ms`);
 
-      // For MVP AI Provider, we use the first image as base reference
-      const baseFile = files[0];
+      // Input curation for premium mode: select best reference photos
+      let curatedFiles = imageFiles;
+      if (mode === 'premium' && imageFiles.length > 1) {
+        const curation = selectBestReferencePhotos(
+          imageFiles.map(f => ({ buffer: f.buffer, originalname: f.originalname }))
+        );
+        console.log(`[${id}] Input curation: ${imageFiles.length} files → ${curation.selectedIndices.length} selected`);
+        if (curation.warnings.length > 0) {
+          console.log(`[${id}] Curation warnings: ${curation.warnings.join('; ')}`);
+        }
+        if (curation.hardReject) {
+          console.warn(`[${id}] Curation hard reject: ${curation.hardRejectReason}`);
+          // Don't block generation — just warn and use all files as fallback
+          // The credit is already consumed, so we should still try our best
+        }
+        if (curation.selectedIndices.length > 0) {
+          curatedFiles = curation.selectedIndices.map(i => imageFiles[i]);
+        }
+      }
+
+      // Prepare images for AI provider
+      const baseFile = curatedFiles[0];
       const base64Image = baseFile.buffer.toString("base64");
       const mimeType = baseFile.mimetype;
+      
+      // For premium mode, prepare additional images as base64
+      const additionalImages = mode === 'premium' 
+        ? curatedFiles.slice(1).map(file => file.buffer.toString("base64"))
+        : [];
 
       // Progressive state tracking
       let completedCount = 0;
@@ -136,11 +238,44 @@ apiRouter.post("/generate", upload.array("images", 15), async (req, res, next) =
       const errors: string[] = [];
       let dbUpdateChain = Promise.resolve();
 
-      // Task for generating a single image
+      // Task for generating a single image (with quality gate + reroll)
       const generateOne = async (styleId: StyleId, index: number) => {
-        const prompt = buildPrompt(config.promptTier, styleId);
-        const resultBase64 = await aiProvider.generateImage(base64Image, mimeType, prompt);
-        const resultBuffer = Buffer.from(resultBase64, "base64");
+        const { prompt, negativePrompt } = buildPrompt(config.promptTier, styleId, index);
+
+        let resultBase64 = await aiProvider.generateImage(base64Image, mimeType, prompt, mode, additionalImages);
+        let resultBuffer = Buffer.from(resultBase64, "base64");
+
+        // Quality gate (premium only) with logging for retry analysis
+        if (mode === 'premium') {
+          const gate = await evaluateGeneratedPhoto(
+            base64Image, resultBase64, resultBuffer, mimeType, styleId, id, index
+          );
+
+          // NEW: Log retry analysis data (retry disabled this week - MAX_RETRIES=0)
+          if (gate.rerollMode && process.env.RETRY_MODE_ENABLED === 'true' && parseInt(process.env.QUALITY_MAX_RETRIES || '0') > 0) {
+            console.log(`[${id}] Image ${index}: WOULD retry with mode=${gate.rerollMode} (disabled this week)`);
+            // PLACEHOLDER: Targeted retry logic will go here after logging validation
+            // const retryPrompt = buildPrompt(config.promptTier, styleId, index, { retryMode: gate.rerollMode });
+            // resultBase64 = await aiProvider.generateImage(base64Image, mimeType, retryPrompt.prompt, mode, additionalImages);
+          }
+
+          // Existing simple retry (unchanged this week)
+          if (gate.shouldReroll) {
+            console.log(`[${id}] Image ${index}: quality gate failed (score=${gate.score.overallScore}), attempting reroll...`);
+            try {
+              resultBase64 = await aiProvider.generateImage(base64Image, mimeType, prompt, mode, additionalImages);
+              resultBuffer = Buffer.from(resultBase64, "base64");
+              // Re-evaluate after reroll (just log, don't reroll again)
+              const rerollGate = await evaluateGeneratedPhoto(
+                base64Image, resultBase64, resultBuffer, mimeType, styleId, id, index
+              );
+              console.log(`[${id}] Image ${index}: reroll result score=${rerollGate.score.overallScore}, pass=${rerollGate.score.overallPass}`);
+            } catch (rerollErr: any) {
+              console.warn(`[${id}] Image ${index}: reroll failed: ${rerollErr.message}, using original`);
+            }
+          }
+        }
+
         const resultPath = await storage.save(resultBuffer, `${id}_result_${index}.jpg`, "result");
         return resultPath;
       };
@@ -150,21 +285,22 @@ apiRouter.post("/generate", upload.array("images", 15), async (req, res, next) =
         if (result.status === "fulfilled") {
           completedCount++;
           successPaths.push(result.value);
-          console.log(`Generation ${id}: image ${index + 1}/${schedule.length} completed (${completedCount} done)`);
-
-          // Progressive Telegram delivery — send each photo immediately
-          if (telegramChatId) {
-            const caption = schedule.length === 1
-              ? "Your portrait is ready!"
-              : `Portrait ${completedCount} of ${schedule.length}`;
-            deliverTelegramPhoto(telegramChatId, result.value, caption).catch(err => {
-              console.error(`Progressive delivery failed for item ${index}:`, err);
-            });
+          console.log(`[${id}] Image ${index + 1}/${schedule.length} completed (${completedCount} done)`);
+          
+          // Progressive Telegram delivery: send each premium photo immediately as it completes.
+          // Free (1 image) is delivered in the final batch call below to avoid double-send.
+          if (mode === 'premium') {
+            const chatTarget = telegramChatId || telegramUserId;
+            if (chatTarget) {
+              deliverTelegramPhoto(chatTarget, result.value).catch(err =>
+                console.error(`[${id}] Progressive delivery failed for image ${index + 1}: ${err.message}`)
+              );
+            }
           }
         } else {
           failedCount++;
           errors.push(result.reason?.message || "Unknown error");
-          console.warn(`Generation ${id}: image ${index + 1}/${schedule.length} failed: ${result.reason?.message}`);
+          console.warn(`[${id}] Image ${index + 1}/${schedule.length} failed: ${result.reason?.message}`);
         }
 
         // Chain DB updates sequentially to avoid race conditions
@@ -178,7 +314,7 @@ apiRouter.post("/generate", upload.array("images", 15), async (req, res, next) =
         ).catch(err => console.error("Progressive DB update error:", err));
       };
 
-      // Run generation with package-specific concurrency
+      // Run generation using env-configured concurrency and delay (PREMIUM_CONCURRENCY, INTER_REQUEST_DELAY_MS)
       await runBatched(schedule, generateOne, {
         concurrency: genConfig.concurrency,
         delayMs: genConfig.delayMs,
@@ -207,7 +343,21 @@ apiRouter.post("/generate", upload.array("images", 15), async (req, res, next) =
         })
         .eq("id", id);
 
-      console.log(`Generation ${id} done: status=${finalStatus}, completed=${completedCount}, failed=${failedCount}`);
+      console.log(`[${id}] Done: status=${finalStatus}, completed=${completedCount}, failed=${failedCount}`);
+
+      // Cleanup quality gate reroll tracking
+      clearRerollTracking(id);
+
+      // Final Telegram delivery: only for free/preview (1 image).
+      // Premium images are already delivered progressively per-image above.
+      if (completedCount > 0 && mode !== 'premium') {
+        const targetChatId = telegramChatId || telegramUserId;
+        if (targetChatId) {
+          deliverTelegramResults(targetChatId, successPaths).catch(err => {
+            console.error(`Final delivery failed for generation ${id}:`, err);
+          });
+        }
+      }
 
     } catch (genError: any) {
       console.error("Generation batch failed:", genError);
@@ -221,6 +371,37 @@ apiRouter.post("/generate", upload.array("images", 15), async (req, res, next) =
   }
 });
 
+// ─── ETA helpers for processing screen ───────────────────────────────────────────
+function etaSecToText(sec: number): string {
+  if (sec <= 45)  return "меньше минуты";
+  if (sec <= 120)  return "1–2 минуты";
+  if (sec <= 240)  return "2–4 минуты";
+  if (sec <= 480)  return "4–8 минут";
+  return "8+ минут";
+}
+
+function computeEtaText(completed: number, total: number, createdAt: string | null): string {
+  const remaining = total - completed;
+  if (remaining <= 0) return "Почти готово";
+
+  // Dynamic refinement: use observed rate once we have ≥2 completed images
+  if (completed >= 2 && createdAt) {
+    const elapsedSec = (Date.now() - new Date(createdAt).getTime()) / 1000;
+    if (elapsedSec > 5) {
+      const avgPerImage = elapsedSec / completed;
+      // Cap at 120s/image to prevent wild values from slow initial batches
+      const clampedAvg = Math.min(avgPerImage, 120);
+      return etaSecToText(clampedAvg * remaining);
+    }
+  }
+
+  // Baseline estimate by total count (before enough data points)
+  if (total <= 1)  return "меньше минуты";
+  if (total <= 7)  return "1–3 минуты";
+  if (total <= 25) return "3–6 минут";
+  return "6–12 минут";
+}
+
 // 2. Check Status
 apiRouter.get("/status/:id", async (req, res, next) => {
   try {
@@ -229,7 +410,7 @@ apiRouter.get("/status/:id", async (req, res, next) => {
 
     const { data: row, error } = await db
       .from("generations")
-      .select("id, status, result_path, result_paths, results_completed, results_failed, results_total, error_message")
+      .select("id, status, result_path, result_paths, results_completed, results_failed, results_total, error_message, created_at")
       .eq("id", id)
       .single();
 
@@ -243,6 +424,10 @@ apiRouter.get("/status/:id", async (req, res, next) => {
       ? row.result_paths.map((p: string) => `${publicBaseUrl}/${p}`) 
       : (resultUrl ? [resultUrl] : []);
 
+    const etaText = row.status === "processing"
+      ? computeEtaText(row.results_completed || 0, row.results_total || 1, row.created_at || null)
+      : null;
+
     res.json({
       id: row.id,
       status: row.status,
@@ -253,9 +438,137 @@ apiRouter.get("/status/:id", async (req, res, next) => {
         failed: row.results_failed || 0,
         total: row.results_total || 1,
       },
+      etaText,
       error: row.error_message,
     });
   } catch (error) {
     next(error);
+  }
+});
+
+// ─── Monetization: Packages, Balance, Catalog, Invoice ─────────────────────
+
+const STORE_PACKAGES = [
+  { id: "starter", title: "Starter", generations: PACKAGES.starter.outputCount, priceBYN: 9.90,  starsPrice: 150 },
+  { id: "pro",     title: "Pro",     generations: PACKAGES.pro.outputCount,     priceBYN: 24.90, starsPrice: 350, badge: "ХИТ ПРОДАЖ" },
+  { id: "max",     title: "Max",     generations: PACKAGES.max.outputCount,     priceBYN: 49.90, starsPrice: 750 },
+];
+
+// Get user balance (free_credits + paid_credits)
+// --- Authentication Endpoint ---
+apiRouter.post("/auth", async (req, res, next) => {
+  try {
+    console.log('AUTH PAYLOAD:', req.body);
+    const { telegramId, username } = req.body;
+    
+    if (!telegramId) {
+      return res.status(400).json({ error: "Telegram ID is required" });
+    }
+
+    const db = getDb();
+    
+    // Upsert user: only using telegram_id and username to avoid schema errors
+    const { data, error } = await db
+      .from("users")
+      .upsert(
+        {
+          telegram_id: parseInt(telegramId, 10),
+          username: username || null,
+        },
+        { onConflict: 'telegram_id', ignoreDuplicates: true } 
+      )
+      .select("free_credits, paid_credits")
+      .single();
+
+    if (error && error.code !== 'PGRST116') {
+      console.error("Auth upsert error:", error);
+      return res.status(500).json({ error: "Failed to authenticate user", details: error });
+    }
+
+    // If ignoreDuplicates hit (user exists), the upsert might return null data depending on Supabase version.
+    // Let's just fetch the current balance to return it.
+    const { data: user, error: fetchError } = await db
+      .from("users")
+      .select("free_credits, paid_credits")
+      .eq("telegram_id", parseInt(telegramId, 10))
+      .single();
+
+    if (fetchError) {
+      console.error("Auth fetch error:", fetchError);
+      return res.status(500).json({ error: "Failed to fetch user data" });
+    }
+
+    res.json({
+      success: true,
+      freeCredits: user?.free_credits ?? 0,
+      paidCredits: user?.paid_credits ?? 0
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.get("/user/balance", async (req, res, next) => {
+  try {
+    const telegramId = req.query.telegramId as string;
+    if (!telegramId) return res.json({ freeCredits: 1, paidCredits: 0 });
+
+    const db = getDb();
+    const { data: user } = await db
+      .from("users")
+      .select("free_credits, paid_credits")
+      .eq("telegram_id", telegramId)
+      .single();
+
+    if (!user) {
+      return res.json({ freeCredits: 1, paidCredits: 0 });
+    }
+
+    res.json({
+      freeCredits: user.free_credits ?? 0,
+      paidCredits: user.paid_credits ?? 0,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Get store catalog
+apiRouter.get("/payment/catalog", (_req, res) => {
+  const catalog = STORE_PACKAGES.map(pkg => ({
+    id: pkg.id,
+    title: pkg.title,
+    generations: pkg.generations,
+    priceBYN: pkg.priceBYN,
+    starsPrice: pkg.starsPrice,
+    badge: (pkg as any).badge || null,
+  }));
+  res.json({ catalog });
+});
+
+// Create Telegram Stars invoice
+apiRouter.post("/payment/create-invoice", async (req, res, next) => {
+  try {
+    const { packageId, telegramId } = req.body;
+    if (!telegramId) return res.status(400).json({ error: "telegramId is required" });
+    const pkg = STORE_PACKAGES.find(p => p.id === packageId);
+    if (!pkg) return res.status(400).json({ error: "Package not found" });
+
+    const { getBotInstance } = await import("./telegram.js");
+    const bot = getBotInstance();
+    if (!bot) return res.status(500).json({ error: "Bot not initialized" });
+
+    const invoiceLink = await bot.telegram.createInvoiceLink({
+      title: `MyAURA: ${pkg.title}`,
+      description: `+${pkg.generations} генераций фото`,
+      payload: `${telegramId}_${packageId}_${Date.now()}`,
+      provider_token: "",
+      currency: "XTR",
+      prices: [{ label: pkg.title, amount: pkg.starsPrice }],
+    });
+
+    res.json({ invoiceLink, starsPrice: pkg.starsPrice });
+  } catch (err) {
+    next(err);
   }
 });

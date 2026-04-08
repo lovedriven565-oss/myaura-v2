@@ -1,14 +1,22 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useNavigate, Link } from "react-router-dom";
-import { Camera, X, Sparkles, Sun, Wand2 } from "lucide-react";
+import { Camera, X, Sparkles, Sun, Wand2, Wallet } from "lucide-react";
 
-// Detect Telegram Mini App chat ID for delivery
-function getTelegramChatId(): string | null {
+// Detect Telegram Mini App IDs for delivery
+function getTelegramIds(): { chatId: string | null; userId: string | null } {
   try {
     const tg = (window as any).Telegram?.WebApp;
+    if (tg) tg.ready();
+    if (!tg) return { chatId: null, userId: null };
     const userId = tg?.initDataUnsafe?.user?.id;
-    return userId ? String(userId) : null;
-  } catch { return null; }
+    const explicitChatId = tg?.initDataUnsafe?.chat?.id;
+    return {
+      chatId: explicitChatId ? String(explicitChatId) : null,
+      userId: userId ? String(userId) : null
+    };
+  } catch {
+    return { chatId: null, userId: null };
+  }
 }
 
 export default function UploadFree() {
@@ -16,7 +24,33 @@ export default function UploadFree() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [agreed, setAgreed] = useState(false);
+  const [freeCredits, setFreeCredits] = useState(0);
+  const [paidCredits, setPaidCredits] = useState(0);
+  const [balanceLoading, setBalanceLoading] = useState(true);
   const navigate = useNavigate();
+  const { userId: tgUserId } = getTelegramIds();
+
+  // Preview mode: free_credits first, then paid_credits
+  const canGenerate = freeCredits > 0 || paidCredits > 0;
+
+  // Fetch balance on mount
+  useEffect(() => {
+    const fetchBalance = async () => {
+      try {
+        const url = tgUserId ? `/api/user/balance?telegramId=${tgUserId}` : `/api/user/balance`;
+        const res = await fetch(url);
+        const data = await res.json();
+        setFreeCredits(data.freeCredits ?? 0);
+        setPaidCredits(data.paidCredits ?? 0);
+      } catch {
+        setFreeCredits(1);
+        setPaidCredits(0);
+      } finally {
+        setBalanceLoading(false);
+      }
+    };
+    fetchBalance();
+  }, [tgUserId]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -26,6 +60,11 @@ export default function UploadFree() {
   };
 
   const handleUpload = async () => {
+    if (loading || balanceLoading) return; // Prevent double submit
+    if (!canGenerate) {
+      navigate("/premium");
+      return;
+    }
     if (!file) {
       setError("Пожалуйста, выберите фото");
       return;
@@ -38,11 +77,20 @@ export default function UploadFree() {
     setLoading(true);
     setError("");
 
+    const { chatId, userId } = getTelegramIds();
+
+    if (!userId) {
+      setError("Откройте приложение через Telegram для генерации");
+      setLoading(false);
+      return;
+    }
+    
     const formData = new FormData();
     formData.append("images", file);
     formData.append("packageId", "free");
+    formData.append("mode", "preview");
     formData.append("styleIds", JSON.stringify(["business"]));
-    const chatId = getTelegramChatId();
+    formData.append("telegramUserId", userId);
     if (chatId) formData.append("telegramChatId", chatId);
 
     try {
@@ -52,11 +100,25 @@ export default function UploadFree() {
       });
       const data = await res.json();
 
-      if (!res.ok) throw new Error(data.error || "Ошибка загрузки");
+      if (res.status === 403 && data.code === "INSUFFICIENT_FUNDS") {
+        setError("У вас закончились бесплатные генерации. Перейдите в раздел Premium, чтобы продолжить!");
+        setFreeCredits(0);
+        setPaidCredits(0);
+        setLoading(false);
+        return;
+      }
+
+      if (res.status === 404 && data.code === "USER_NOT_FOUND") {
+        setError("Пользователь не найден. Перезапустите приложение.");
+        setLoading(false);
+        return;
+      }
+
+      if (!res.ok) throw new Error("Произошла ошибка при генерации. Попробуйте ещё раз.");
 
       navigate(`/processing/${data.id}`);
     } catch (err: any) {
-      setError(err.message);
+      setError(err.message || "Произошла ошибка. Попробуйте ещё раз.");
       setLoading(false);
     }
   };
@@ -74,12 +136,30 @@ export default function UploadFree() {
       </header>
 
       <main className="flex-grow pt-24 pb-32 px-6 flex flex-col max-w-lg mx-auto w-full">
-        <section className="mb-8">
+        <section className="mb-6">
           <h1 className="text-3xl font-light tracking-tight mb-2">Бесплатный Preview</h1>
           <p className="text-white/60 text-[15px] leading-relaxed font-light">
             Загрузите одно селфи, чтобы увидеть качество генерации.
           </p>
         </section>
+
+        {/* Free credits badge */}
+        <div className="mb-8 flex justify-center">
+          {balanceLoading ? (
+            <div className="px-4 py-2 rounded-full bg-white/5 border border-white/10 text-[13px] text-white/40">Загрузка...</div>
+          ) : (
+            <div className={`px-5 py-2.5 rounded-full border flex items-center gap-2.5 ${canGenerate ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-red-500/10 border-red-500/30'}`}>
+              <Wallet className={`w-4 h-4 ${canGenerate ? 'text-emerald-400' : 'text-red-400'}`} />
+              <span className={`text-[13px] font-medium ${canGenerate ? 'text-emerald-300' : 'text-red-300'}`}>
+                {freeCredits > 0
+                  ? "1 бесплатная генерация доступна"
+                  : paidCredits > 0
+                    ? `Баланс: ${paidCredits} генераций`
+                    : "Бесплатная генерация использована"}
+              </span>
+            </div>
+          )}
+        </div>
 
         <label className="relative group cursor-pointer mb-8 block">
           <input type="file" accept="image/jpeg, image/png" className="hidden" onChange={handleFileChange} />
@@ -139,11 +219,19 @@ export default function UploadFree() {
 
           <button 
             onClick={handleUpload}
-            disabled={loading}
+            disabled={loading || balanceLoading}
             className="w-full h-14 bg-white/10 hover:bg-white/15 border border-white/10 text-white font-medium text-[15px] rounded-2xl transition-all active:scale-[0.98] flex items-center justify-center gap-2 disabled:opacity-50"
           >
-            <span>{loading ? "Загрузка..." : "Создать бесплатно"}</span>
-            {!loading && <Sparkles className="w-4 h-4 text-white/70" />}
+            {loading ? (
+              <span>Генерация...</span>
+            ) : canGenerate ? (
+              <>
+                <span>Создать бесплатно</span>
+                <Sparkles className="w-4 h-4 text-white/70" />
+              </>
+            ) : (
+              <span>Перейти к Premium</span>
+            )}
           </button>
           
           <div className="text-center mt-4">
@@ -152,6 +240,8 @@ export default function UploadFree() {
             </Link>
           </div>
         </div>
+
+        <p className="text-center text-[10px] text-white/20 mt-6">v3.1</p>
       </main>
     </div>
   );
