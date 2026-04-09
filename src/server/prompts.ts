@@ -135,10 +135,9 @@ export function buildPromptProfile(styleId: StyleId, mode: PromptType, index: nu
     ? MEDIUM_RISK_IDENTITY_GUARD
     : "";
 
-  // Explicitly merge style-specific negative constraints into the main prompt
+  // Quality constraints for POSITIVE prompt only (negativePrompt goes to finalNegativePrompt)
   const dynamicQualityConstraints = QUALITY_CONSTRAINTS.trim() + "\n" +
-    (mode === "free" ? "- NO passport-photo flatness for preview mode.\n" : "") +
-    `- ${styleConfig.negativePrompt}`;
+    (mode === "free" ? "- NO passport-photo flatness for preview mode.\n" : "");
 
   const debugPromptParts = {
     identityLockHeader: IDENTITY_LOCK_HEADER.trim(),

@@ -20,6 +20,7 @@ const INIT_DATA_MAX_AGE_SECONDS = 300; // 5 minutes replay protection
 /**
  * Validates Telegram Mini App initData using HMAC-SHA256
  * Verifies signature and checks auth_date freshness (anti-replay)
+ * Reference: https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
  */
 function validateInitData(initData: string): { valid: boolean; telegramId?: number; error?: string } {
   if (!initData || !BOT_TOKEN) {
@@ -27,16 +28,31 @@ function validateInitData(initData: string): { valid: boolean; telegramId?: numb
   }
 
   try {
-    // Parse initData string (key=value&key=value...)
-    const params = new URLSearchParams(initData);
-    const hash = params.get("hash");
-    const authDate = params.get("auth_date");
+    // Parse initData manually to preserve URL-encoding (URLSearchParams decodes values)
+    const params: Record<string, string> = {};
+    const pairs = initData.split("&");
+    let hash: string | null = null;
+
+    for (const pair of pairs) {
+      const eqIndex = pair.indexOf("=");
+      if (eqIndex === -1) continue;
+
+      const key = pair.substring(0, eqIndex);
+      const value = pair.substring(eqIndex + 1); // Keep raw URL-encoded value
+
+      if (key === "hash") {
+        hash = value;
+      } else {
+        params[key] = value;
+      }
+    }
 
     if (!hash) {
       return { valid: false, error: "Missing hash in initData" };
     }
 
     // Check auth_date freshness (anti-replay protection)
+    const authDate = params["auth_date"];
     if (authDate) {
       const now = Math.floor(Date.now() / 1000);
       const authTimestamp = parseInt(authDate, 10);
@@ -49,12 +65,10 @@ function validateInitData(initData: string): { valid: boolean; telegramId?: numb
       return { valid: false, error: "Missing auth_date in initData" };
     }
 
-    // Build data_check_string by sorting keys (except hash) alphabetically
-    const dataCheckString = Array.from(params.entries())
-      .filter(([key]) => key !== "hash")
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([key, value]) => `${key}=${value}`)
-      .join("\n");
+    // Build data_check_string by sorting keys alphabetically, joining with \n
+    // Per Telegram spec: keys sorted alphabetically, format: key1=value1\nkey2=value2
+    const sortedKeys = Object.keys(params).sort();
+    const dataCheckString = sortedKeys.map(key => `${key}=${params[key]}`).join("\n");
 
     // Create secret key: HMAC-SHA256("WebAppData", bot_token)
     const secretKey = crypto
@@ -95,8 +109,12 @@ function validateInitData(initData: string): { valid: boolean; telegramId?: numb
  * Express middleware to validate Telegram initData from request body/header
  */
 function initDataAuthMiddleware(req: any, res: any, next: any) {
-  // Accept initData from body (POST requests) or x-init-data header
-  const initData = req.body?.initData || req.headers["x-init-data"] || req.headers["X-Init-Data"];
+  // Accept initData from body (POST requests) or x-telegram-init-data header (sent by frontend)
+  const initData = req.body?.initData
+    || req.headers["x-telegram-init-data"]
+    || req.headers["X-Telegram-Init-Data"]
+    || req.headers["x-init-data"]
+    || req.headers["X-Init-Data"];
 
   if (!initData) {
     // Allow requests without initData for non-Telegram clients (dev/testing)
