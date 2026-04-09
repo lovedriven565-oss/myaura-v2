@@ -2,53 +2,32 @@ export type PromptType = "free" | "premium";
 export type StyleId = "business" | "lifestyle" | "aura" | "cinematic" | "luxury" | "editorial";
 
 // ─── Identity Lock Header ────────────────────────────────────────────────────
-// Placed FIRST in every prompt — before mode, before style.
-const IDENTITY_LOCK_HEADER = `PRIORITY 0 — IDENTITY IS NON-NEGOTIABLE:
-This is a portrait generation of a SPECIFIC REAL PERSON shown in the reference photo(s).
-Preserve this person's facial identity COMPLETELY: face shape, proportions, ethnicity, age appearance, skin tone, eye shape, nose, lips, jawline — UNCHANGED.
-Style transformations apply ONLY to clothing, lighting, background, atmosphere, and pose.
-NEVER reconstruct, reshape, idealize, slim, sharpen, or alter the face in any way.`;
+const IDENTITY_LOCK_HEADER = `[SYSTEM OVERRIDE: STRICT BIOMETRIC MATCH REQUIRED]
+PRIORITY 0: This is a 1:1 photorealistic generation of a SPECIFIC REAL PERSON. 
+You MUST maintain 100% biometric fidelity to the reference photo.
+The output face MUST be geometrically identical to the input: exact face width, jawline shape, cheek fullness, nose proportions, and eye spacing.
+ABSOLUTE RULE: Do NOT slim the face. Do NOT sharpen the jawline. Do NOT "beautify", idealize, or normalize the facial structure.`;
 
 // ─── Style Risk Guards ───────────────────────────────────────────────────────
-// Appended after the style modifier block for medium and high-risk styles.
-const MEDIUM_RISK_IDENTITY_GUARD = `IDENTITY PRESERVATION REMINDER: The elegant or atmospheric aesthetic of this style MUST NOT lead to skin over-smoothing, facial softening beyond realism, or subtle drift toward a more conventionally attractive archetype. Preserve exact facial character, natural pore texture, and this person's authentic facial structure.`;
+const MEDIUM_RISK_IDENTITY_GUARD = `IDENTITY PRESERVATION CHECK: Ensure the style does not cause skin over-smoothing. Retain raw, authentic facial geometry and natural pore texture.`;
 
-const HIGH_RISK_IDENTITY_GUARD = `IDENTITY OVERRIDE — ABSOLUTE HARD CONSTRAINT: The dramatic or fashion-forward aesthetic of this style MUST NOT cause jaw sharpening, cheek hollowing from shadow, bone structure exaggeration, nose narrowing, increased under-eye darkness, or any drift toward a generic cinematic / editorial face archetype. This person's face geometry is a fixed non-negotiable constraint. Style is subordinate to identity.`;
+const HIGH_RISK_IDENTITY_GUARD = `BIOMETRIC OVERRIDE: The dramatic lighting/style MUST NOT cause cheek hollowing, jaw sharpening, or bone structure exaggeration. The face shape must remain EXACTLY as round or wide as the reference. Style is subordinate to identity.`;
 
 const BASE_IDENTITY_PROMPT = `
-CRITICAL IDENTITY REQUIREMENTS:
-- Preserve EXACT facial geometry, proportions, and recognizable face structure.
-- Preserve ethnicity, gender presentation, and natural age appearance.
-- Preserve exact skin tone and natural skin tone variation.
-- Preserve eye shape, natural eye spacing, iris color, and realistic eye detail.
-- Preserve natural facial fullness. Do NOT create a hollow or gaunt face effect.
-- Maintain sharp detail around eyes, nose, lips, and central facial features.
-- Do NOT perform face replacement, face reshaping, artificial rejuvenation, or beauty-filter smoothing.
-
-EXPRESSION / MOOD CONTROL:
-- Create a calm, confident, approachable expression.
-- Ensure a relaxed jawline, resting facial muscles, and lively eyes with catchlights.
-- Maintain subtle magnetic confidence and natural facial softness.
-- DO NOT create a sad, tense, tired, or stern passport-like expression.
-- DO NOT create compressed lips, a downturned mouth, or a hardened older-looking expression.
-
-SKIN CLEANUP POLICY:
-- Create photorealistic epidermal detail, visible pores, and realistic micro texture.
-- Maintain healthy healed skin without smoothing filters; clean premium skin without waxiness.
-- Remove ONLY temporary acne, pimples, inflamed breakouts, temporary redness, and transient blemishes.
-- NEVER erase pores, micro-texture, real skin contours, natural skin tone variation, freckles, or permanent recognizable facial character.
+CRITICAL IDENTITY & TEXTURE REQUIREMENTS:
+- BIOMETRICS: Preserve exact facial geometry, natural asymmetry, face width, and natural fullness. NO face slimming. NO model-like bone structure interpolation.
+- SKIN TEXTURE: RAW, unretouched photographic texture. Preserve visible pores, micro-details, natural skin tone gradients, and exact facial hair/stubble as seen in the reference.
+- EYES & EXPRESSION: Natural resting expression. Exact eye shape and iris detail. NO generic AI stare.
+- PROHIBITED ACTIONS: NO face replacement, NO artificial rejuvenation, NO digital airbrushing.
 `;
 
 const QUALITY_CONSTRAINTS = `
 STRICT AVOIDANCE (CRITICAL):
-- NO plastic skin, waxiness, airbrushed beauty filters, or porcelain texture.
-- NO artificial rejuvenation, childification, or exaggerated youth effect.
-- NO acne, pimples, active inflamed blemishes, or temporary breakouts.
-- NO generic AI face, face reshaping, identity drift, face slimming, jaw sharpening, altered nose, changed eye spacing, altered hairline, or model-face substitution.
-- NO sad, gloomy, tense, or emotionally flat expressions.
-- NO uncanny eyes, distorted eye shape, unnatural reflections, or tired narrowed eyes.
-- NO harsh aging from dramatic lighting, no excessive under-eye darkness, no exaggerated nasolabial shadows.
-- NO extreme blur or depth-of-field that softens the face too much.
+- NO plastic skin, waxiness, or CGI rendering effects.
+- NO aesthetic normalization (do NOT make the person look like a generic model/actor).
+- NO jawline sharpening, face narrowing, or altered nose geometry.
+- NO over-exposed or blown-out highlights that destroy skin texture.
+- NO exaggerated shadows that artificially age or alter bone structure.
 `;
 
 const FREE_PREVIEW_LAYER = `
@@ -65,10 +44,9 @@ Soft clean studio or daylight-balanced lighting, natural premium portrait, fresh
 
 const PREMIUM_LAYER = `
 PREMIUM RESULT REQUIREMENTS:
-Create a premium, high-end style-faithful portrait photoshoot.
-WARDROBE TRANSFORMATION IS MANDATORY: You MUST completely change the subject's clothing to match the specific style instructions below. Do NOT keep the original input clothing.
-The result must feel expensive, refined, realistic, and highly detailed.
-The face MUST remain the same exact person as in the reference photo. Style transformation applies ONLY to clothing, lighting, background, and pose. Do NOT reconstruct, slim, sharpen, or idealize the face to match the style aesthetic.
+Create a high-end, realistic photoshoot.
+WARDROBE TRANSFORMATION IS MANDATORY: Completely change the subject's clothing to match the specific style instructions below.
+The face MUST remain the exact biometric match of the input person with RAW skin texture. Style transformation applies ONLY to clothing, lighting, background, and pose.
 `;
 
 interface StyleConfig {
