@@ -41,19 +41,13 @@ function getTelegramIds(): { chatId: string | null; userId: string | null } {
 
 
 interface CatalogPkg {
-
   id: string;
-
   title: string;
-
   generations: number;
-
   priceBYN: number;
-
+  priceRUB: number;
   starsPrice: number;
-
   badge: string | null;
-
 }
 
 
@@ -855,11 +849,8 @@ export default function UploadPremium() {
                     </div>
 
                     <div className="text-right">
-
-                      <div className="text-[16px] font-semibold text-white">{pkg.priceBYN} BYN</div>
-
-                      <div className="text-[14px] font-medium text-[#c084fc] mt-1">{pkg.starsPrice} ⭐️</div>
-
+                      <div className="text-[18px] font-bold text-white">{pkg.starsPrice} ⭐️</div>
+                      <div className="text-[11px] text-white/40 mt-0.5">(~{pkg.priceBYN} BYN / {pkg.priceRUB} RUB)</div>
                     </div>
 
                   </div>

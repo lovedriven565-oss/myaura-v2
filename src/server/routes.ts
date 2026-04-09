@@ -240,7 +240,13 @@ apiRouter.post("/generate",
 
       // Task for generating a single image (with quality gate + reroll)
       const generateOne = async (styleId: StyleId, index: number) => {
-        const { prompt, negativePrompt } = buildPrompt(config.promptTier, styleId, index);
+        // Defensive: ensure valid StyleId, fallback to business only if undefined
+        const validStyleId: StyleId = (styleId && ["business", "lifestyle", "aura", "cinematic", "luxury", "editorial"].includes(styleId)) ? styleId : "business";
+        if (validStyleId !== styleId) {
+          console.warn(`[${id}] Image ${index}: Invalid styleId "${styleId}", falling back to business`);
+        }
+        console.log(`[${id}] Image ${index}: Generating with style="${validStyleId}", tier="${config.promptTier}"`);
+        const { prompt, negativePrompt } = buildPrompt(config.promptTier, validStyleId, index);
 
         let resultBase64 = await aiProvider.generateImage(base64Image, mimeType, prompt, mode, additionalImages);
         let resultBuffer = Buffer.from(resultBase64, "base64");
@@ -440,9 +446,9 @@ apiRouter.get("/status/:id", async (req, res, next) => {
 // ─── Monetization: Packages, Balance, Catalog, Invoice ─────────────────────
 
 const STORE_PACKAGES = [
-  { id: "starter", title: "Starter", generations: PACKAGES.starter.outputCount, priceBYN: 9.90,  starsPrice: 150 },
-  { id: "pro",     title: "Pro",     generations: PACKAGES.pro.outputCount,     priceBYN: 24.90, starsPrice: 350, badge: "ХИТ ПРОДАЖ" },
-  { id: "max",     title: "Max",     generations: PACKAGES.max.outputCount,     priceBYN: 49.90, starsPrice: 750 },
+  { id: "starter", title: "Starter", generations: PACKAGES.starter.outputCount, priceBYN: 9.90, priceRUB: 250, starsPrice: 150 },
+  { id: "pro",     title: "Pro",     generations: PACKAGES.pro.outputCount,     priceBYN: 24.90, priceRUB: 650, starsPrice: 350, badge: "ХИТ ПРОДАЖ" },
+  { id: "max",     title: "Max",     generations: PACKAGES.max.outputCount,     priceBYN: 49.90, priceRUB: 1300, starsPrice: 750 },
 ];
 
 // Get user balance (free_credits + paid_credits)
@@ -531,6 +537,7 @@ apiRouter.get("/payment/catalog", (_req, res) => {
     title: pkg.title,
     generations: pkg.generations,
     priceBYN: pkg.priceBYN,
+    priceRUB: pkg.priceRUB,
     starsPrice: pkg.starsPrice,
     badge: (pkg as any).badge || null,
   }));

@@ -28,6 +28,11 @@ STRICT AVOIDANCE (CRITICAL):
 - NO jawline sharpening, face narrowing, or altered nose geometry.
 - NO over-exposed or blown-out highlights that destroy skin texture.
 - NO exaggerated shadows that artificially age or alter bone structure.
+
+SKIN TEXTURE HARDENING (REQUIRED):
+- High-frequency photographic detail, sharp focus on skin pores.
+- 8k resolution textures, ultra-detailed facial hair and micro-features.
+- RAW unprocessed skin appearance, no beauty filter smoothing.
 `;
 
 const FREE_PREVIEW_LAYER = `
