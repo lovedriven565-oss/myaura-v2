@@ -16,9 +16,11 @@ const HIGH_RISK_IDENTITY_GUARD = `BIOMETRIC OVERRIDE: The dramatic lighting/styl
 const BASE_IDENTITY_PROMPT = `
 CRITICAL IDENTITY & TEXTURE REQUIREMENTS:
 - BIOMETRICS: Preserve exact facial geometry, natural asymmetry, face width, and natural fullness. NO face slimming. NO model-like bone structure interpolation.
-- SKIN TEXTURE: RAW, unretouched photographic texture. Preserve visible pores, micro-details, natural skin tone gradients, and exact facial hair/stubble as seen in the reference.
+- SKIN TEXTURE: Soft natural cinematic texture. Healthy real skin without hyper-detail noise.
 - EYES & EXPRESSION: Natural resting expression. Exact eye shape and iris detail. NO generic AI stare.
 - PROHIBITED ACTIONS: NO face replacement, NO artificial rejuvenation, NO digital airbrushing.
+
+ANTI-BEAUTIFICATION OVERRIDE: Do NOT apply cosmetic normalization, generic model archetype blending, or beauty filters to the face. Preserve the exact unique eye shape, nose shape, and facial proportions of the specific individual. The output must NOT look like a generic attractive AI model.
 `;
 
 const QUALITY_CONSTRAINTS = `
@@ -30,8 +32,7 @@ STRICT AVOIDANCE (CRITICAL):
 - NO exaggerated shadows that artificially age or alter bone structure.
 
 NATURAL SKIN BALANCE (REQUIRED):
-- Naturally smooth cinematic skin with soft facial focus.
-- High-end commercial retouching style (invisible, not overdone).
+- Soft natural cinematic lighting, healthy real skin.
 - Realistic but flattering skin texture — healthy, not hyper-detailed.
 - Preserve natural skin character without emphasizing imperfections.
 `;
@@ -164,7 +165,7 @@ export function buildPromptProfile(styleId: StyleId, mode: PromptType, index: nu
     debugPromptParts.qualityConstraints
   ].filter(Boolean).join("\n\n");
 
-  const finalNegativePrompt = "ugly, deformed, poorly drawn, bad anatomy, bad lighting, low resolution, blurry, watermark, text, amateur photography, heavy skin grain, exaggerated pores, deep facial lines, acne scars, hyper-realistic wrinkles, " + styleConfig.negativePrompt;
+  const finalNegativePrompt = "ugly, deformed, poorly drawn, bad anatomy, bad lighting, low resolution, blurry, watermark, text, amateur photography, heavy skin grain, exaggerated pores, deep facial lines, acne scars, hyper-realistic wrinkles, generic AI face, Instagram face, plastic surgery look, changed facial structure, altered eye shape, altered nose shape, generic model archetype, " + styleConfig.negativePrompt;
 
   return {
     positivePrompt: finalPrompt,
