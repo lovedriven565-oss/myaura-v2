@@ -29,10 +29,11 @@ STRICT AVOIDANCE (CRITICAL):
 - NO over-exposed or blown-out highlights that destroy skin texture.
 - NO exaggerated shadows that artificially age or alter bone structure.
 
-SKIN TEXTURE HARDENING (REQUIRED):
-- High-frequency photographic detail, sharp focus on skin pores.
-- 8k resolution textures, ultra-detailed facial hair and micro-features.
-- RAW unprocessed skin appearance, no beauty filter smoothing.
+NATURAL SKIN BALANCE (REQUIRED):
+- Naturally smooth cinematic skin with soft facial focus.
+- High-end commercial retouching style (invisible, not overdone).
+- Realistic but flattering skin texture — healthy, not hyper-detailed.
+- Preserve natural skin character without emphasizing imperfections.
 `;
 
 const FREE_PREVIEW_LAYER = `
@@ -163,7 +164,7 @@ export function buildPromptProfile(styleId: StyleId, mode: PromptType, index: nu
     debugPromptParts.qualityConstraints
   ].filter(Boolean).join("\n\n");
 
-  const finalNegativePrompt = "ugly, deformed, poorly drawn, bad anatomy, bad lighting, low resolution, blurry, watermark, text, amateur photography, " + styleConfig.negativePrompt;
+  const finalNegativePrompt = "ugly, deformed, poorly drawn, bad anatomy, bad lighting, low resolution, blurry, watermark, text, amateur photography, heavy skin grain, exaggerated pores, deep facial lines, acne scars, hyper-realistic wrinkles, " + styleConfig.negativePrompt;
 
   return {
     positivePrompt: finalPrompt,
