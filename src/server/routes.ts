@@ -9,8 +9,122 @@ import { validatePackageInput, buildStyleSchedule, buildStyleScheduleWithCount, 
 import { deliverTelegramPhoto, deliverTelegramResults } from "./telegram.js";
 import { selectBestReferencePhotos } from "./inputCuration.js";
 import { evaluateGeneratedPhoto, clearRerollTracking } from "./qualityGate.js";
+import crypto from "crypto";
 
 export const apiRouter = Router();
+
+// ─── Telegram initData Validation (Security) ─────────────────────────────────
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
+const INIT_DATA_MAX_AGE_SECONDS = 300; // 5 minutes replay protection
+
+/**
+ * Validates Telegram Mini App initData using HMAC-SHA256
+ * Verifies signature and checks auth_date freshness (anti-replay)
+ */
+function validateInitData(initData: string): { valid: boolean; telegramId?: number; error?: string } {
+  if (!initData || !BOT_TOKEN) {
+    return { valid: false, error: "Missing initData or BOT_TOKEN" };
+  }
+
+  try {
+    // Parse initData string (key=value&key=value...)
+    const params = new URLSearchParams(initData);
+    const hash = params.get("hash");
+    const authDate = params.get("auth_date");
+
+    if (!hash) {
+      return { valid: false, error: "Missing hash in initData" };
+    }
+
+    // Check auth_date freshness (anti-replay protection)
+    if (authDate) {
+      const now = Math.floor(Date.now() / 1000);
+      const authTimestamp = parseInt(authDate, 10);
+      const age = now - authTimestamp;
+
+      if (age > INIT_DATA_MAX_AGE_SECONDS || age < -60) {
+        return { valid: false, error: `initData expired or invalid (age=${age}s, max=${INIT_DATA_MAX_AGE_SECONDS}s)` };
+      }
+    } else {
+      return { valid: false, error: "Missing auth_date in initData" };
+    }
+
+    // Build data_check_string by sorting keys (except hash) alphabetically
+    const dataCheckString = Array.from(params.entries())
+      .filter(([key]) => key !== "hash")
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, value]) => `${key}=${value}`)
+      .join("\n");
+
+    // Create secret key: HMAC-SHA256("WebAppData", bot_token)
+    const secretKey = crypto
+      .createHmac("sha256", "WebAppData")
+      .update(BOT_TOKEN)
+      .digest();
+
+    // Calculate signature: HMAC-SHA256(secret_key, data_check_string)
+    const calculatedHash = crypto
+      .createHmac("sha256", secretKey)
+      .update(dataCheckString)
+      .digest("hex");
+
+    // Compare signatures (constant-time comparison not critical here, but good practice)
+    if (calculatedHash !== hash) {
+      return { valid: false, error: "Invalid initData signature" };
+    }
+
+    // Extract user data if needed
+    const userJson = params.get("user");
+    let telegramId: number | undefined;
+    if (userJson) {
+      try {
+        const user = JSON.parse(userJson);
+        telegramId = user.id;
+      } catch {
+        // Non-critical: validation passed but couldn't parse user
+      }
+    }
+
+    return { valid: true, telegramId };
+  } catch (err: any) {
+    return { valid: false, error: `Validation error: ${err.message}` };
+  }
+}
+
+/**
+ * Express middleware to validate Telegram initData from request body/header
+ */
+function initDataAuthMiddleware(req: any, res: any, next: any) {
+  // Accept initData from body (POST requests) or x-init-data header
+  const initData = req.body?.initData || req.headers["x-init-data"] || req.headers["X-Init-Data"];
+
+  if (!initData) {
+    // Allow requests without initData for non-Telegram clients (dev/testing)
+    // In production, you may want to strictly enforce this
+    if (process.env.INIT_DATA_STRICT === "true") {
+      return res.status(401).json({ error: "Missing initData authentication" });
+    }
+    return next();
+  }
+
+  const validation = validateInitData(initData);
+
+  if (!validation.valid) {
+    console.warn(`[Auth] Invalid initData: ${validation.error}`);
+    return res.status(401).json({ error: "Invalid authentication", details: validation.error });
+  }
+
+  // Attach validated telegramId to request for downstream use
+  if (validation.telegramId) {
+    req.telegramId = validation.telegramId;
+  }
+
+  next();
+}
+
+// Apply initData auth middleware to all API routes
+apiRouter.use(initDataAuthMiddleware);
+
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB limit per file
 
 const ALLOWED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]);

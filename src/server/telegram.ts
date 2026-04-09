@@ -169,8 +169,10 @@ export function initTelegramBot() {
         return;
       }
 
-      // Idempotency check
+      // Idempotency check: use telegram_payment_charge_id if available, fallback to payload
+      const chargeId = payment.telegram_payment_charge_id || payload;
       const { error: insertError } = await db.from("processed_payments").insert({
+        charge_id: chargeId,
         payload: payload,
         telegram_id: telegramId,
         package_id: packageId,
@@ -179,7 +181,7 @@ export function initTelegramBot() {
 
       if (insertError) {
         if (insertError.code === "23505") {
-          console.log(`[Idempotency] Payment ${payload} already processed.`);
+          console.log(`[Idempotency] Payment charge_id=${chargeId} already processed. Skipping.`);
           return;
         }
         throw insertError;

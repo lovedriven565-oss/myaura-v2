@@ -1,4 +1,5 @@
 import { GoogleGenAI } from "@google/genai";
+import crypto from "crypto";
 
 export interface IGenerationProvider {
   generateImage(originalImageBase64: string, mimeType: string, prompt: string, mode?: 'preview' | 'premium', additionalImages?: string[]): Promise<string>;
@@ -8,6 +9,45 @@ export interface IGenerationProvider {
 // Both are confirmed Vertex AI models with image output support on location: global
 const FREE_MODEL_ID = "gemini-2.5-flash-image";       // Vertex AI, global, Public preview
 const PREMIUM_MODEL_ID = "gemini-3-pro-image-preview"; // Vertex AI, global, Public preview
+
+// Retry configuration for resilience against 429 rate limits
+const MAX_RETRIES = 3;
+const BASE_DELAY_MS = 1000;
+const MAX_DELAY_MS = 30000;
+
+/**
+ * Exponential backoff with jitter for resilient API calls
+ * Formula: min(t_max, t_base * 2^attempt + random_jitter)
+ */
+async function withExponentialBackoff<T>(
+  operation: () => Promise<T>,
+  operationName: string,
+  maxRetries: number = MAX_RETRIES
+): Promise<T> {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await operation();
+    } catch (error: any) {
+      const isRateLimit = error?.status === 429 ||
+                         error?.message?.includes("429") ||
+                         error?.message?.includes("RESOURCE_EXHAUSTED") ||
+                         error?.code === 429;
+
+      if (!isRateLimit || attempt >= maxRetries) {
+        throw error;
+      }
+
+      // Exponential backoff with jitter: min(t_max, t_base * 2^attempt + random_jitter)
+      const exponentialDelay = BASE_DELAY_MS * Math.pow(2, attempt);
+      const jitter = Math.floor(Math.random() * 1000); // 0-1000ms random jitter
+      const delayMs = Math.min(MAX_DELAY_MS, exponentialDelay + jitter);
+
+      console.warn(`[Retry] ${operationName} failed with 429. Retrying in ${delayMs}ms (attempt ${attempt + 1}/${maxRetries})...`);
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+  throw new Error(`withExponentialBackoff: unreachable`);
+}
 
 // Safety settings: minimize blocking for real face generation
 const SAFETY_SETTINGS = [
@@ -28,7 +68,7 @@ export class VertexAIProvider implements IGenerationProvider {
   }
 
   async generateImage(originalImageBase64: string, mimeType: string, prompt: string, mode: 'preview' | 'premium' = 'premium', additionalImages?: string[]): Promise<string> {
-    try {
+    const operation = async () => {
       // Build contents array: images first, prompt last
       const contents: any[] = [];
 
@@ -67,6 +107,10 @@ export class VertexAIProvider implements IGenerationProvider {
       }
 
       throw new Error(`No image data returned from Vertex AI model (${modelId})`);
+    };
+
+    try {
+      return await withExponentialBackoff(operation, "VertexAI.generateImage");
     } catch (error: any) {
       console.error("Vertex AI Generation Error:", error);
       throw new Error(error.message || "Failed to generate image via Vertex AI");
@@ -83,7 +127,7 @@ export class GeminiProvider implements IGenerationProvider {
   }
 
   async generateImage(originalImageBase64: string, mimeType: string, prompt: string, mode: 'preview' | 'premium' = 'premium', additionalImages?: string[]): Promise<string> {
-    try {
+    const operation = async () => {
       // Build contents array: images first, prompt last
       const contents: any[] = [];
 
@@ -122,6 +166,10 @@ export class GeminiProvider implements IGenerationProvider {
       }
 
       throw new Error(`No image data returned from model (${modelId})`);
+    };
+
+    try {
+      return await withExponentialBackoff(operation, "Gemini.generateImage");
     } catch (error: any) {
       console.error("AI Generation Error:", error);
       throw new Error(error.message || "Failed to generate image");
