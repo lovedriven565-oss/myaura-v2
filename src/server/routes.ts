@@ -245,21 +245,12 @@ apiRouter.post("/generate",
         let resultBase64 = await aiProvider.generateImage(base64Image, mimeType, prompt, mode, additionalImages);
         let resultBuffer = Buffer.from(resultBase64, "base64");
 
-        // Quality gate (premium only) with logging for retry analysis
+        // Quality gate (premium only)
         if (mode === 'premium') {
           const gate = await evaluateGeneratedPhoto(
             base64Image, resultBase64, resultBuffer, mimeType, styleId, id, index
           );
 
-          // NEW: Log retry analysis data (retry disabled this week - MAX_RETRIES=0)
-          if (gate.rerollMode && process.env.RETRY_MODE_ENABLED === 'true' && parseInt(process.env.QUALITY_MAX_RETRIES || '0') > 0) {
-            console.log(`[${id}] Image ${index}: WOULD retry with mode=${gate.rerollMode} (disabled this week)`);
-            // PLACEHOLDER: Targeted retry logic will go here after logging validation
-            // const retryPrompt = buildPrompt(config.promptTier, styleId, index, { retryMode: gate.rerollMode });
-            // resultBase64 = await aiProvider.generateImage(base64Image, mimeType, retryPrompt.prompt, mode, additionalImages);
-          }
-
-          // Existing simple retry (unchanged this week)
           if (gate.shouldReroll) {
             console.log(`[${id}] Image ${index}: quality gate failed (score=${gate.score.overallScore}), attempting reroll...`);
             try {

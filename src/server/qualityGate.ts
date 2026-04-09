@@ -6,41 +6,27 @@
  */
 
 export interface QualityScore {
-  // 3-Score system (0.00-1.00 scale)
-  identityScore: number;       // Face geometry and recognizability
-  expressionScore: number;     // Natural expression, anti-fatigue
-  noveltyScore: number;        // Visual differentiation from source
-
-  // Legacy compatibility (0-100 scale)
   likenessScore: number;      // 0-100: does the face match references?
   ageDriftScore: number;      // 0-100: 100 = no age change, 0 = severe aging/de-aging
   skinRealismScore: number;   // 0-100: 100 = natural skin, 0 = plastic/wax
   eyeConsistencyScore: number;// 0-100: eye color and detail preserved
   premiumLookScore: number;   // 0-100: overall premium quality feel
-
   overallPass: boolean;
   overallScore: number;
   rejectReasons: string[];
-  rerollMode: "identity" | "expression" | "echo" | null;
 }
 
 export interface QualityGateResult {
   score: QualityScore;
   shouldReroll: boolean;
-  rerollMode: "identity" | "expression" | "echo" | null;
   evaluationMethod: "multimodal_judge" | "rule_based_fallback";
   evaluationTimeMs: number;
 }
 
-// Configurable thresholds with env wrappers
-const IDENTITY_THRESHOLD = parseFloat(process.env.QUALITY_IDENTITY_THRESHOLD || "0.86");
-const EXPRESSION_THRESHOLD = parseFloat(process.env.QUALITY_EXPRESSION_THRESHOLD || "0.82");
-const NOVELTY_THRESHOLD = parseFloat(process.env.QUALITY_NOVELTY_THRESHOLD || "0.45");
-const HARD_FAIL_IDENTITY = parseFloat(process.env.QUALITY_HARD_FAIL_IDENTITY || "0.60");
-const HARD_FAIL_EXPRESSION = parseFloat(process.env.QUALITY_HARD_FAIL_EXPRESSION || "0.50");
-const HARD_FAIL_NOVELTY = parseFloat(process.env.QUALITY_HARD_FAIL_NOVELTY || "0.30");
-const MAX_RETRIES = parseInt(process.env.QUALITY_MAX_RETRIES || "0");
-const RETRY_MODE_ENABLED = process.env.RETRY_MODE_ENABLED === "true";
+// Configurable thresholds
+const PASS_THRESHOLD = parseInt(process.env.QUALITY_GATE_PASS_THRESHOLD || "55");
+const REROLL_ENABLED = process.env.QUALITY_GATE_REROLL_ENABLED !== "false"; // default true
+const MAX_REROLLS_PER_IMAGE = parseInt(process.env.QUALITY_GATE_MAX_REROLLS || "1");
 
 // Track reroll counts per generation
 const rerollCounts = new Map<string, number>();
@@ -93,23 +79,12 @@ Respond ONLY with a JSON object, no markdown, no explanation:
     const parsed = JSON.parse(jsonMatch[0]);
     const rejectReasons: string[] = [];
 
-    // 3-Score threshold checks
-    if (parsed.identityScore < IDENTITY_THRESHOLD) rejectReasons.push("identity_below_threshold");
-    if (parsed.identityScore < HARD_FAIL_IDENTITY) rejectReasons.push("HARD_FAIL: different_person_detected");
-    if (parsed.expressionScore < EXPRESSION_THRESHOLD) rejectReasons.push("expression_below_threshold");
-    if (parsed.expressionScore < HARD_FAIL_EXPRESSION) rejectReasons.push("HARD_FAIL: sad_tired_expression");
-    if (parsed.noveltyScore < NOVELTY_THRESHOLD) rejectReasons.push("novelty_below_threshold");
-    if (parsed.noveltyScore < HARD_FAIL_NOVELTY) rejectReasons.push("HARD_FAIL: near_duplicate_of_source");
-
-    // Determine rerollMode for targeted retry (when enabled)
-    let rerollMode: QualityGateResult["rerollMode"] = null;
-    if (parsed.identityScore < HARD_FAIL_IDENTITY) {
-      rerollMode = "identity";
-    } else if (parsed.expressionScore < HARD_FAIL_EXPRESSION) {
-      rerollMode = "expression";
-    } else if (parsed.noveltyScore < HARD_FAIL_NOVELTY) {
-      rerollMode = "echo";
-    }
+    if (parsed.likeness < 55) rejectReasons.push("low_likeness");
+    if (parsed.ageDrift < 50) rejectReasons.push("age_drift_detected");
+    if (parsed.skinRealism < 50) rejectReasons.push("unrealistic_skin");
+    if (parsed.eyeConsistency < 50) rejectReasons.push("eye_inconsistency");
+    if (parsed.premiumLook < 40) rejectReasons.push("low_premium_quality");
+    if (parsed.expressionScore < 40) rejectReasons.push("sad_or_tense_expression");
 
     const overallScore = Math.round(
       (parsed.likeness * 0.35) +      // identity is the product — highest weight
@@ -121,20 +96,14 @@ Respond ONLY with a JSON object, no markdown, no explanation:
     );
 
     return {
-      // 3-Score system
-      identityScore: parsed.identityScore ?? 0.75,
-      expressionScore: parsed.expressionScore ?? 0.75,
-      noveltyScore: parsed.noveltyScore ?? 0.60,
-      // Legacy fields
       likenessScore: parsed.likeness,
       ageDriftScore: parsed.ageDrift,
       skinRealismScore: parsed.skinRealism,
       eyeConsistencyScore: parsed.eyeConsistency,
       premiumLookScore: parsed.premiumLook,
-      overallPass: (parsed.identityScore ?? 0.75) >= IDENTITY_THRESHOLD && (parsed.expressionScore ?? 0.75) >= EXPRESSION_THRESHOLD && (parsed.noveltyScore ?? 0.60) >= NOVELTY_THRESHOLD,
+      overallPass: overallScore >= PASS_THRESHOLD,
       overallScore,
       rejectReasons,
-      rerollMode,
     };
   } catch (err: any) {
     console.warn(`[QualityGate] Multimodal judge failed: ${err.message}`);
@@ -189,24 +158,15 @@ function ruleBasedFallback(generatedBuffer: Buffer, style: string): QualityScore
 
   const overallScore = Math.round((premiumLookScore + skinRealismScore + 70 + 70 + 70) / 5);
 
-  // Conservative defaults for 3-score system when visual judge unavailable
-  const identityScore = 0.75;
-  const expressionScore = 0.75;
-  const noveltyScore = 0.60;
-
   return {
-    identityScore,
-    expressionScore,
-    noveltyScore,
-    likenessScore: 75,
-    ageDriftScore: 75,
+    likenessScore: 70, // can't assess without reference comparison
+    ageDriftScore: 70,
     skinRealismScore,
-    eyeConsistencyScore: 75,
+    eyeConsistencyScore: 70,
     premiumLookScore,
-    overallPass: rejectReasons.length === 0,
+    overallPass: overallScore >= PASS_THRESHOLD && rejectReasons.length === 0,
     overallScore,
     rejectReasons,
-    rerollMode: null,
   };
 }
 
@@ -241,37 +201,20 @@ export async function evaluateGeneratedPhoto(
 
   const elapsed = Date.now() - startTime;
 
-  // Determine if reroll is warranted (disabled this week: MAX_RETRIES=0)
+  // Determine if reroll is warranted
   const rerollKey = `${generationId}_${imageIndex}`;
   const currentRerolls = rerollCounts.get(rerollKey) || 0;
-  const shouldReroll = false; // Disabled: MAX_RETRIES is 0 this week
+  const shouldReroll = REROLL_ENABLED && !score.overallPass && currentRerolls < MAX_REROLLS_PER_IMAGE;
 
-  // JSON structured logging for analysis (log what WOULD retry)
-  const wouldReroll = !score.overallPass && currentRerolls < MAX_RETRIES;
-  if (wouldReroll) {
+  if (shouldReroll) {
     rerollCounts.set(rerollKey, currentRerolls + 1);
   }
 
-  console.log(JSON.stringify({
-    event: "quality_gate_eval",
-    generationId,
-    imageIndex,
-    identityScore: score.identityScore,
-    expressionScore: score.expressionScore,
-    noveltyScore: score.noveltyScore,
-    overallPass: score.overallPass,
-    shouldReroll: false, // Hard disabled this week
-    wouldReroll, // What would happen if retries enabled
-    rerollMode: score.rerollMode,
-    rejectReasons: score.rejectReasons,
-    evaluationTimeMs: elapsed,
-    timestamp: new Date().toISOString()
-  }));
+  console.log(`[QualityGate][${generationId}] Image ${imageIndex}: method=${method}, score=${score.overallScore}, pass=${score.overallPass}, reroll=${shouldReroll}, time=${elapsed}ms${score.rejectReasons.length ? ', reasons=[' + score.rejectReasons.join(',') + ']' : ''}`);
 
   return {
     score,
-    shouldReroll: false, // Always false this week
-    rerollMode: score.rerollMode,
+    shouldReroll,
     evaluationMethod: method,
     evaluationTimeMs: elapsed,
   };

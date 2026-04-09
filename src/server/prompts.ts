@@ -63,20 +63,13 @@ PREVIEW VISUAL DIRECTION:
 Soft clean studio or daylight-balanced lighting, natural premium portrait, fresh and approachable. Not cinematic, not harsh, not flat ID/passport-like.
 `;
 
-const PREMIUM_PROFILE = `LAYER 7 — PREMIUM_PROFILE:
-Create a premium portrait with visible quality upgrade from the source image.
-
-PREMIUM UPGRADES (apply these while preserving exact identity):
-- WARDROBE: Elevate to expensive, style-appropriate clothing. Strong upgrade encouraged.
-- BACKGROUND: Transform to premium setting that complements the style.
-- LIGHTING: Sophisticated, expensive-looking, flattering to face.
-- COMPOSITION: Professional framing, intentional premium crop.
-
-IDENTITY DOMINANCE RULE:
-These upgrades apply ONLY to wardrobe, background, lighting, and framing.
-The person's face, body proportions, age, and recognizability remain EXACTLY as in the reference.
-If any style instruction conflicts with preserving the same exact person, IDENTITY ALWAYS WINS.
-Style transforms the scene, NEVER the person.`;
+const PREMIUM_LAYER = `
+PREMIUM RESULT REQUIREMENTS:
+Create a premium, high-end style-faithful portrait photoshoot.
+WARDROBE TRANSFORMATION IS MANDATORY: You MUST completely change the subject's clothing to match the specific style instructions below. Do NOT keep the original input clothing.
+The result must feel expensive, refined, realistic, and highly detailed.
+The face MUST remain the same exact person as in the reference photo. Style transformation applies ONLY to clothing, lighting, background, and pose. Do NOT reconstruct, slim, sharpen, or idealize the face to match the style aesthetic.
+`;
 
 interface StyleConfig {
   promptModifier: string;
@@ -102,15 +95,15 @@ export const PROMPT_STYLES_V2: Record<StyleId, StyleConfig> = {
     styleRisk: "safe"
   },
   "cinematic": {
-    promptModifier: "WARDROBE: Textured cinematic outerwear, dark moody fabrics, stylish layers. STYLE: cinematic premium portrait with controlled soft contrast — preserve full facial detail, no shadow-induced bone exaggeration. Confident and alive, NOT brooding, NOT intense, NOT melancholic. Calm grounded presence with cinematic wardrobe only. Apply cinematic lighting WITHOUT altering face geometry.",
-    negativePrompt: "NO unchanged input clothing in premium mode, NO tired under-eye darkness, NO villain energy, NO harsh aging from shadows, NO hollow cheeks from contrast, NO brooding intensity, NO melancholic mood, NO leading man bone structure exaggeration.",
+    promptModifier: "WARDROBE: Textured cinematic outerwear, dark moody fabrics, stylish layers. STYLE: cinematic premium portrait with controlled chiaroscuro — preserve full facial detail even in shadow areas. Cinematic confidence without sadness or fatigue. Avoid shadow placement that creates cheek hollowing, under-eye darkening, or bone structure exaggeration. Apply cinematic lighting and wardrobe WITHOUT altering jaw shape, nose, cheek depth, or any facial bone structure.",
+    negativePrompt: "NO unchanged input clothing in premium mode, NO tired under-eye darkness, NO villain energy, NO harsh aging from shadows, NO hollow cheeks, NO shadow-induced facial reconstruction, NO older harder version of the person.",
     retouchPolicy: "micro_contrast",
     lightingPolicy: "dramatic_cinematic",
     styleRisk: "high"
   },
   "editorial": {
-    promptModifier: "WARDROBE: Avant-garde fashion styling, bold architectural garments, high-end magazine wardrobe. STYLE: high-end editorial portrait — editorial styling applies ONLY to wardrobe, lighting, and composition. Fresh, composed, trustworthy. The face stays 100% authentic to the reference person. NO drift toward generic fashion model or editorial male beauty archetype. NO sharp emphasis on bone structure.",
-    negativePrompt: "NO unchanged input clothing in premium mode, NO cheap glamour look, NO wax skin, NO over-airbrushed magazine face, NO face reconstruction toward model archetype, NO angular sharpening, NO editorial male beauty ideal, NO striking features emphasis.",
+    promptModifier: "WARDROBE: Avant-garde fashion styling, bold architectural garments, high-end magazine wardrobe. STYLE: high-end editorial portrait — editorial styling applies ONLY to wardrobe, lighting, and composition. Controlled premium retouch, sharp eyes, photorealistic epidermal detail, polished editorial finish without beauty filter, premium studio lighting. The face MUST stay 100% authentic to the reference person. Do NOT drift toward a generic fashion model or editorial archetype face.",
+    negativePrompt: "NO unchanged input clothing in premium mode, NO cheap glamour look, NO wax skin, NO over-airbrushed magazine face, NO face reconstruction toward model archetype, NO angular sharpening of facial structure.",
     retouchPolicy: "editorial_clean",
     lightingPolicy: "editorial_studio",
     styleRisk: "high"
@@ -133,7 +126,7 @@ export const PROMPT_STYLES_V2: Record<StyleId, StyleConfig> = {
 
 export function buildPromptProfile(styleId: StyleId, mode: PromptType, index: number = 0): { positivePrompt: string; negativePrompt: string; debugPromptParts: any } {
   const isPremium = mode === "premium";
-  const layerPrompt = isPremium ? PREMIUM_PROFILE : FREE_PREVIEW_LAYER;
+  const layerPrompt = isPremium ? PREMIUM_LAYER : FREE_PREVIEW_LAYER;
   const styleConfig = PROMPT_STYLES_V2[styleId] || PROMPT_STYLES_V2["business"];
 
   // Controlled Variety Strategy for Premium batches
