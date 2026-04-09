@@ -63,7 +63,7 @@ Respond ONLY with a JSON object, no markdown, no explanation:
 {"likeness":N,"ageDrift":N,"skinRealism":N,"eyeConsistency":N,"premiumLook":N,"expressionScore":N}`;
 
     const response = await ai.models.generateContent({
-      model: "gemini-2.0-flash-001",
+      model: "gemini-1.5-flash",
       contents: [
         { inlineData: { data: referenceBase64, mimeType } },
         { inlineData: { data: generatedBase64, mimeType } },
