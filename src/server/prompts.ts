@@ -2,23 +2,24 @@ export type PromptType = "free" | "premium";
 export type StyleId = "business" | "lifestyle" | "aura" | "cinematic" | "luxury" | "editorial";
 
 // ─── Identity Lock Header ────────────────────────────────────────────────────
-const IDENTITY_LOCK_HEADER = `[SYSTEM OVERRIDE: STRICT BIOMETRIC MATCH]
-PRIORITY 0: 1:1 photorealistic portrait of the SPECIFIC REAL PERSON in the reference image.
-Maintain 100% biometric fidelity: exact face width, jawline shape, nose proportions, and eye spacing.`;
+const IDENTITY_LOCK_HEADER = `
+PRIORITY 0: Exact 1:1 photorealistic match of the person in the provided reference image.
+Maintain exact facial volume, youthful eye-area structure, and natural cheek fullness.
+NO facial hollowing, NO added wrinkles, NO deepening of nasolabial folds.`;
 
-const BASE_IDENTITY_PROMPT = `
+const BASE_IDENTITY_PROMPT = ` 
 CRITICAL IDENTITY & VITALITY:
-- BIOMETRICS: Preserve exact facial geometry, natural asymmetry, and youthful facial volume.
-- SKIN & TEXTURE: Supple healthy skin with fine epidermal texture.
-- EYES & EXPRESSION: Confident and approachable gaze with a subtle hint of a micro-smile. Warm presence, relaxed facial muscles with gentle vitality. Sparkling catchlights in eyes.
+- BIOMETRICS: Preserve exact facial geometry. Keep the face looking well-rested and energetic.
+- SKIN TEXTURE: Healthy, supple skin with subtle micro-pores. Natural healthy skin radiance. Supple skin with even tone.
+- EYES & EXPRESSION: Confident, clear eyes with bright catchlights. Natural relaxed presence.
+- AVOID: No dark circles, no tired eyes, no skin redness, no exaggerated texture.
 `;
 
 const QUALITY_CONSTRAINTS = `
-PREMIUM FINISH POLICY:
-- Youthful skin elasticity and supple texture.
-- Visible micro-pores without deep lines or creases.
-- Even skin tone with natural healthy radiance.
-- Smooth transitions in shadow areas to avoid artificial aging.
+NATURAL COMPLIMENTARY LIGHTING:
+- Use soft-box studio lighting to wrap around features.
+- Fill shadows to maintain smooth facial transitions and avoid aging.
+- High-end professional color grading with natural skin tones.
 `;
 
 const FREE_PREVIEW_LAYER = `
@@ -64,10 +65,10 @@ export const PROMPT_STYLES_V2: Record<StyleId, StyleConfig> = {
     styleRisk: "safe"
   },
   "cinematic": {
-    promptModifier: "WARDROBE: Textured cinematic outerwear, stylish layers. STYLE: High-end cinematic portrait using soft volumetric key lighting. Complimentary wrap-around light that fills facial recesses. Cinematic confidence and vitality. Focus on soft-focus depth and premium color grading. Preserve jawline and cheek fullness without harsh shadow-induced hollowing.",
-    negativePrompt: "NO tired under-eye darkness, NO villain energy, NO harsh aging from shadows, NO hollow cheeks, NO shadow-induced facial reconstruction, NO older harder version of the person.",
-    retouchPolicy: "micro_contrast",
-    lightingPolicy: "dramatic_cinematic",
+    promptModifier: "WARDROBE: High-end textured cinematic layers. STYLE: Modern cinematic portrait. Use soft volumetric key light. Focus on vitality and presence. The face must be clearly illuminated to preserve all identity markers from the reference image. NO heavy shadows on the face, NO grit-induced aging.",
+    negativePrompt: "different person, generic man face, deep facial lines, sunken eyes, heavy eye bags, rough skin, weathered face, older version of subject, tired look, dramatic chiaroscuro on skin, redness",
+    retouchPolicy: "soft_natural_skin",
+    lightingPolicy: "soft_volumetric_cinematic",
     styleRisk: "high"
   },
   "editorial": {
@@ -140,13 +141,10 @@ export function buildPromptProfile(styleId: StyleId, mode: PromptType, index: nu
   ].filter(Boolean).join("\n\n");
 
   const finalNegativePrompt = [
-    "nasolabial folds, deep wrinkles, under-eye bags, crow's feet, sagging skin, hyperpigmentation, skin mottling, tired look, exhaustion, melancholy expression",
-    "ugly, deformed, poorly drawn, bad anatomy, bad lighting, low resolution, blurry, watermark, text, amateur photography",
-    "face replacement, artificial rejuvenation, digital airbrushing, cosmetic normalization, generic model archetype blending, beauty filters",
-    "face slimming, model-like bone structure interpolation, generic AI stare, plastic skin, waxiness, CGI rendering effects",
-    "aesthetic normalization, jawline sharpening, face narrowing, altered nose geometry",
-    "over-exposed highlights, blown-out highlights, exaggerated shadows, heavy skin grain, exaggerated pores, deep facial lines, acne scars",
-    "hyper-realistic wrinkles, generic AI face, Instagram face, plastic surgery look, changed facial structure, altered eye shape, altered nose shape",
+    "nasolabial folds, crow's feet, under-eye bags, forehead wrinkles, hollow cheeks, saggy skin",
+    "different person, generic male face, archetype face, celebrity lookalike, facial reconstruction",
+    "oily skin, red skin, acne scars, hyper-pigmentation, sunburned skin, rough texture, sharp micro-contrast",
+    "sadness, exhaustion, anger, tense face, squinting eyes",
     styleConfig.negativePrompt
   ].join(", ");
 
