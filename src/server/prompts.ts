@@ -2,39 +2,22 @@ export type PromptType = "free" | "premium";
 export type StyleId = "business" | "lifestyle" | "aura" | "cinematic" | "luxury" | "editorial";
 
 // ─── Identity Lock Header ────────────────────────────────────────────────────
-const IDENTITY_LOCK_HEADER = `[SYSTEM OVERRIDE: STRICT BIOMETRIC MATCH REQUIRED]
-PRIORITY 0: This is a 1:1 photorealistic generation of a SPECIFIC REAL PERSON. 
-You MUST maintain 100% biometric fidelity to the reference photo.
-The output face MUST be geometrically identical to the input: exact face width, jawline shape, cheek fullness, nose proportions, and eye spacing.
-ABSOLUTE RULE: Do NOT slim the face. Do NOT sharpen the jawline. Do NOT "beautify", idealize, or normalize the facial structure.`;
-
-// ─── Style Risk Guards ───────────────────────────────────────────────────────
-const MEDIUM_RISK_IDENTITY_GUARD = `IDENTITY PRESERVATION CHECK: Ensure the style does not cause skin over-smoothing. Retain raw, authentic facial geometry and natural pore texture.`;
-
-const HIGH_RISK_IDENTITY_GUARD = `BIOMETRIC OVERRIDE: The dramatic lighting/style MUST NOT cause cheek hollowing, jaw sharpening, or bone structure exaggeration. The face shape must remain EXACTLY as round or wide as the reference. Style is subordinate to identity.`;
+const IDENTITY_LOCK_HEADER = `[SYSTEM OVERRIDE: STRICT BIOMETRIC MATCH]
+PRIORITY 0: 1:1 photorealistic portrait of the SPECIFIC REAL PERSON in the reference image.
+Maintain 100% biometric fidelity: exact face width, jawline shape, nose proportions, and eye spacing.`;
 
 const BASE_IDENTITY_PROMPT = `
-CRITICAL IDENTITY & TEXTURE REQUIREMENTS:
-- BIOMETRICS: Preserve exact facial geometry, natural asymmetry, face width, and natural fullness. NO face slimming. NO model-like bone structure interpolation.
-- SKIN TEXTURE: Soft natural cinematic texture. Healthy real skin without hyper-detail noise.
-- EYES & EXPRESSION: Natural resting expression. Exact eye shape and iris detail. NO generic AI stare.
-- PROHIBITED ACTIONS: NO face replacement, NO artificial rejuvenation, NO digital airbrushing.
-
-ANTI-BEAUTIFICATION OVERRIDE: Do NOT apply cosmetic normalization, generic model archetype blending, or beauty filters to the face. Preserve the exact unique eye shape, nose shape, and facial proportions of the specific individual. The output must NOT look like a generic attractive AI model.
+CRITICAL IDENTITY & TEXTURE:
+- BIOMETRICS: Preserve exact facial geometry, natural asymmetry, and natural fullness.
+- SKIN TEXTURE: Soft natural cinematic texture. Healthy real skin.
+- EYES & EXPRESSION: Natural resting expression. Exact eye shape and iris detail.
 `;
 
 const QUALITY_CONSTRAINTS = `
-STRICT AVOIDANCE (CRITICAL):
-- NO plastic skin, waxiness, or CGI rendering effects.
-- NO aesthetic normalization (do NOT make the person look like a generic model/actor).
-- NO jawline sharpening, face narrowing, or altered nose geometry.
-- NO over-exposed or blown-out highlights that destroy skin texture.
-- NO exaggerated shadows that artificially age or alter bone structure.
-
-NATURAL SKIN BALANCE (REQUIRED):
-- Soft natural cinematic lighting, healthy real skin.
-- Realistic but flattering skin texture — healthy, not hyper-detailed.
-- Preserve natural skin character without emphasizing imperfections.
+NATURAL SKIN BALANCE:
+- Soft natural cinematic lighting.
+- Realistic but flattering skin texture.
+- Preserve natural skin character.
 `;
 
 const FREE_PREVIEW_LAYER = `
@@ -128,16 +111,9 @@ export function buildPromptProfile(styleId: StyleId, mode: PromptType, index: nu
     varietyModifier = `\nVARIATION INSTRUCTION: ${varietyAngles[index % varietyAngles.length]}`;
   }
 
-  // Style risk guard: appended after style modifier for medium/high-risk styles
-  const styleRiskGuard = styleConfig.styleRisk === "high"
-    ? HIGH_RISK_IDENTITY_GUARD
-    : styleConfig.styleRisk === "medium"
-    ? MEDIUM_RISK_IDENTITY_GUARD
-    : "";
-
   // Quality constraints for POSITIVE prompt only (negativePrompt goes to finalNegativePrompt)
   const dynamicQualityConstraints = QUALITY_CONSTRAINTS.trim() + "\n" +
-    (mode === "free" ? "- NO passport-photo flatness for preview mode.\n" : "");
+    (mode === "free" ? "Passport-photo flatness acceptable for preview mode.\n" : "");
 
   const debugPromptParts = {
     identityLockHeader: IDENTITY_LOCK_HEADER.trim(),
@@ -146,7 +122,6 @@ export function buildPromptProfile(styleId: StyleId, mode: PromptType, index: nu
     styleModifier: styleConfig.promptModifier,
     retouchPolicy: styleConfig.retouchPolicy,
     lightingPolicy: styleConfig.lightingPolicy,
-    styleRiskGuard: styleRiskGuard.trim(),
     varietyModifier: varietyModifier.trim(),
     qualityConstraints: dynamicQualityConstraints
   };
@@ -159,12 +134,19 @@ export function buildPromptProfile(styleId: StyleId, mode: PromptType, index: nu
     `Apply lighting: ${debugPromptParts.lightingPolicy}`,
     `Apply retouch: ${debugPromptParts.retouchPolicy}`,
     `Style elements: ${debugPromptParts.styleModifier}`,
-    debugPromptParts.styleRiskGuard,        // Risk guard: after style, before variety
     debugPromptParts.varietyModifier,
     debugPromptParts.qualityConstraints
   ].filter(Boolean).join("\n\n");
 
-  const finalNegativePrompt = "ugly, deformed, poorly drawn, bad anatomy, bad lighting, low resolution, blurry, watermark, text, amateur photography, heavy skin grain, exaggerated pores, deep facial lines, acne scars, hyper-realistic wrinkles, generic AI face, Instagram face, plastic surgery look, changed facial structure, altered eye shape, altered nose shape, generic model archetype, " + styleConfig.negativePrompt;
+  const finalNegativePrompt = [
+    "ugly, deformed, poorly drawn, bad anatomy, bad lighting, low resolution, blurry, watermark, text, amateur photography",
+    "face replacement, artificial rejuvenation, digital airbrushing, cosmetic normalization, generic model archetype blending, beauty filters",
+    "face slimming, model-like bone structure interpolation, generic AI stare, plastic skin, waxiness, CGI rendering effects",
+    "aesthetic normalization, jawline sharpening, face narrowing, altered nose geometry",
+    "over-exposed highlights, blown-out highlights, exaggerated shadows, heavy skin grain, exaggerated pores, deep facial lines, acne scars",
+    "hyper-realistic wrinkles, generic AI face, Instagram face, plastic surgery look, changed facial structure, altered eye shape, altered nose shape",
+    styleConfig.negativePrompt
+  ].join(", ");
 
   return {
     positivePrompt: finalPrompt,
