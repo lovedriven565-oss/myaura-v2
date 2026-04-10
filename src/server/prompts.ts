@@ -7,17 +7,18 @@ PRIORITY 0: 1:1 photorealistic portrait of the SPECIFIC REAL PERSON in the refer
 Maintain 100% biometric fidelity: exact face width, jawline shape, nose proportions, and eye spacing.`;
 
 const BASE_IDENTITY_PROMPT = `
-CRITICAL IDENTITY & TEXTURE:
-- BIOMETRICS: Preserve exact facial geometry, natural asymmetry, and natural fullness.
-- SKIN TEXTURE: Soft natural cinematic texture. Healthy real skin.
-- EYES & EXPRESSION: Natural resting expression. Exact eye shape and iris detail.
+CRITICAL IDENTITY & VITALITY:
+- BIOMETRICS: Preserve exact facial geometry, natural asymmetry, and youthful facial volume.
+- SKIN & TEXTURE: Supple healthy skin with fine epidermal texture.
+- EYES & EXPRESSION: Confident and approachable gaze with a subtle hint of a micro-smile. Warm presence, relaxed facial muscles with gentle vitality. Sparkling catchlights in eyes.
 `;
 
 const QUALITY_CONSTRAINTS = `
-NATURAL SKIN BALANCE:
-- Soft natural cinematic lighting.
-- Realistic but flattering skin texture.
-- Preserve natural skin character.
+PREMIUM FINISH POLICY:
+- Youthful skin elasticity and supple texture.
+- Visible micro-pores without deep lines or creases.
+- Even skin tone with natural healthy radiance.
+- Smooth transitions in shadow areas to avoid artificial aging.
 `;
 
 const FREE_PREVIEW_LAYER = `
@@ -63,8 +64,8 @@ export const PROMPT_STYLES_V2: Record<StyleId, StyleConfig> = {
     styleRisk: "safe"
   },
   "cinematic": {
-    promptModifier: "WARDROBE: Textured cinematic outerwear, dark moody fabrics, stylish layers. STYLE: cinematic premium portrait with controlled chiaroscuro — preserve full facial detail even in shadow areas. Cinematic confidence without sadness or fatigue. Avoid shadow placement that creates cheek hollowing, under-eye darkening, or bone structure exaggeration. Apply cinematic lighting and wardrobe WITHOUT altering jaw shape, nose, cheek depth, or any facial bone structure.",
-    negativePrompt: "NO unchanged input clothing in premium mode, NO tired under-eye darkness, NO villain energy, NO harsh aging from shadows, NO hollow cheeks, NO shadow-induced facial reconstruction, NO older harder version of the person.",
+    promptModifier: "WARDROBE: Textured cinematic outerwear, stylish layers. STYLE: High-end cinematic portrait using soft volumetric key lighting. Complimentary wrap-around light that fills facial recesses. Cinematic confidence and vitality. Focus on soft-focus depth and premium color grading. Preserve jawline and cheek fullness without harsh shadow-induced hollowing.",
+    negativePrompt: "NO tired under-eye darkness, NO villain energy, NO harsh aging from shadows, NO hollow cheeks, NO shadow-induced facial reconstruction, NO older harder version of the person.",
     retouchPolicy: "micro_contrast",
     lightingPolicy: "dramatic_cinematic",
     styleRisk: "high"
@@ -139,6 +140,7 @@ export function buildPromptProfile(styleId: StyleId, mode: PromptType, index: nu
   ].filter(Boolean).join("\n\n");
 
   const finalNegativePrompt = [
+    "nasolabial folds, deep wrinkles, under-eye bags, crow's feet, sagging skin, hyperpigmentation, skin mottling, tired look, exhaustion, melancholy expression",
     "ugly, deformed, poorly drawn, bad anatomy, bad lighting, low resolution, blurry, watermark, text, amateur photography",
     "face replacement, artificial rejuvenation, digital airbrushing, cosmetic normalization, generic model archetype blending, beauty filters",
     "face slimming, model-like bone structure interpolation, generic AI stare, plastic skin, waxiness, CGI rendering effects",
