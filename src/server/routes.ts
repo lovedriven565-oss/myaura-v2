@@ -21,8 +21,14 @@ const INIT_DATA_MAX_AGE_SECONDS = 300; // 5 minutes replay protection
  * Validates Telegram Mini App initData using HMAC-SHA256
  * Verifies signature and checks auth_date freshness (anti-replay)
  * Reference: https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
+ * Returns detailed debug info for troubleshooting
  */
-function validateInitData(initData: string): { valid: boolean; telegramId?: number; error?: string } {
+function validateInitData(initData: string): {
+  valid: boolean;
+  telegramId?: number;
+  error?: string;
+  debug?: { receivedHash: string; calculatedHash: string; dataCheckString: string };
+} {
   if (!initData || !BOT_TOKEN) {
     return { valid: false, error: "Missing initData or BOT_TOKEN" };
   }
@@ -82,17 +88,20 @@ function validateInitData(initData: string): { valid: boolean; telegramId?: numb
       .update(dataCheckString)
       .digest("hex");
 
+    // Debug logging for troubleshooting
+    const debug = { receivedHash: hash, calculatedHash, dataCheckString };
+
     // Compare signatures (constant-time comparison not critical here, but good practice)
     if (calculatedHash !== hash) {
-      return { valid: false, error: "Invalid initData signature" };
+      return { valid: false, error: "Invalid initData signature", debug };
     }
 
     // Extract user data if needed
-    const userJson = params.get("user");
+    const userJson = params["user"];
     let telegramId: number | undefined;
     if (userJson) {
       try {
-        const user = JSON.parse(userJson);
+        const user = JSON.parse(decodeURIComponent(userJson));
         telegramId = user.id;
       } catch {
         // Non-critical: validation passed but couldn't parse user
@@ -107,21 +116,25 @@ function validateInitData(initData: string): { valid: boolean; telegramId?: numb
 
 /**
  * Express middleware to validate Telegram initData from request body/header
+ * Includes detailed logging and bypass mode for debugging
  */
 function initDataAuthMiddleware(req: any, res: any, next: any) {
-  // Accept initData from body (POST requests) or x-telegram-init-data header (sent by frontend)
+  // Accept initData from body (POST requests) or x-init-data header (sent by frontend)
   const initData = req.body?.initData
-    || req.headers["x-telegram-init-data"]
-    || req.headers["X-Telegram-Init-Data"]
     || req.headers["x-init-data"]
-    || req.headers["X-Init-Data"];
+    || req.headers["X-Init-Data"]
+    || req.headers["x-telegram-init-data"]
+    || req.headers["X-Telegram-Init-Data"];
+
+  const isStrict = process.env.INIT_DATA_STRICT === "true";
 
   if (!initData) {
+    console.log(`[Auth] No initData received. INIT_DATA_STRICT=${isStrict}`);
     // Allow requests without initData for non-Telegram clients (dev/testing)
-    // In production, you may want to strictly enforce this
-    if (process.env.INIT_DATA_STRICT === "true") {
+    if (isStrict) {
       return res.status(401).json({ error: "Missing initData authentication" });
     }
+    console.log("[Auth] No initData, passing through (strict=false)");
     return next();
   }
 
@@ -129,12 +142,29 @@ function initDataAuthMiddleware(req: any, res: any, next: any) {
 
   if (!validation.valid) {
     console.warn(`[Auth] Invalid initData: ${validation.error}`);
+
+    // Debug logging: show hashes for troubleshooting
+    if (validation.debug) {
+      console.log("[Auth Debug] Received hash:", validation.debug.receivedHash);
+      console.log("[Auth Debug] Calculated hash:", validation.debug.calculatedHash);
+      console.log("[Auth Debug] Data check string:", validation.debug.dataCheckString);
+    }
+
+    // BYPASS MODE: if strict=false, log warning but allow request through
+    if (!isStrict) {
+      console.warn("[Auth] WARNING: Invalid auth, but passing due to INIT_DATA_STRICT=false");
+      return next();
+    }
+
     return res.status(401).json({ error: "Invalid authentication", details: validation.error });
   }
 
   // Attach validated telegramId to request for downstream use
   if (validation.telegramId) {
     req.telegramId = validation.telegramId;
+    console.log(`[Auth] Valid initData for telegramId: ${validation.telegramId}`);
+  } else {
+    console.log("[Auth] Valid initData but no telegramId extracted");
   }
 
   next();

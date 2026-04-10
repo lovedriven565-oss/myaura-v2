@@ -360,7 +360,7 @@ export default function UploadPremium() {
 
         method: "POST",
 
-        headers: { "X-Telegram-Init-Data": tg?.initData || "" },
+        headers: { "X-Init-Data": tg?.initData || "" },
 
         body: formData,
 

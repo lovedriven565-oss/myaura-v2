@@ -97,7 +97,7 @@ export default function UploadFree() {
       const tg = (window as any).Telegram?.WebApp;
       const res = await fetch("/api/generate", {
         method: "POST",
-        headers: { "X-Telegram-Init-Data": tg?.initData || "" },
+        headers: { "X-Init-Data": tg?.initData || "" },
         body: formData,
       });
       const data = await res.json();
