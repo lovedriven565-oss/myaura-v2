@@ -368,38 +368,29 @@ export default function UploadPremium() {
 
       const data = await res.json();
 
-
+      // Handle auth errors (401) from initData validation
+      if (res.status === 401) {
+        setError(data.error || "Ошибка авторизации. Перезапустите приложение.");
+        setLoading(false);
+        return;
+      }
 
       if (res.status === 403 && data.code === "INSUFFICIENT_FUNDS") {
-
         setError("У вас недостаточно оплаченных генераций. Купите пакет, чтобы продолжить!");
-
         openStore();
-
         setLoading(false);
-
         return;
-
       }
-
-
 
       if (res.status === 404 && data.code === "USER_NOT_FOUND") {
-
         setError("Пользователь не найден. Перезапустите приложение.");
-
         setLoading(false);
-
         return;
-
       }
-
-
 
       if (!res.ok) throw new Error("Произошла ошибка при генерации. Попробуйте ещё раз.");
 
-
-
+      // Async mode: server returns { id, status: "processing" }
       navigate(`/processing/${data.id}`);
 
     } catch (err: any) {

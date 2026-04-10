@@ -102,6 +102,13 @@ export default function UploadFree() {
       });
       const data = await res.json();
 
+      // Handle auth errors (401) from initData validation
+      if (res.status === 401) {
+        setError(data.error || "Ошибка авторизации. Перезапустите приложение.");
+        setLoading(false);
+        return;
+      }
+
       if (res.status === 403 && data.code === "INSUFFICIENT_FUNDS") {
         setError("У вас закончились бесплатные генерации. Перейдите в раздел Premium, чтобы продолжить!");
         setFreeCredits(0);
@@ -118,6 +125,7 @@ export default function UploadFree() {
 
       if (!res.ok) throw new Error("Произошла ошибка при генерации. Попробуйте ещё раз.");
 
+      // Async mode: server returns { id, status: "processing" }
       navigate(`/processing/${data.id}`);
     } catch (err: any) {
       setError(err.message || "Произошла ошибка. Попробуйте ещё раз.");
