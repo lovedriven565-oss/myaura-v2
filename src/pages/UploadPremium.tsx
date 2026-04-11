@@ -395,7 +395,9 @@ export default function UploadPremium() {
       if (!res.ok) throw new Error("Произошла ошибка при генерации. Попробуйте ещё раз.");
 
       // Async mode: server returns { id, status: "processing" }
-      localStorage.setItem("myaura_active_gen", data.id);
+      const _uid = (window as any).Telegram?.WebApp?.initDataUnsafe?.user?.id;
+      const _key = _uid ? `myaura_active_gen_${_uid}` : "myaura_active_gen";
+      localStorage.setItem(_key, data.id);
       navigate(`/processing/${data.id}`);
 
     } catch (err: any) {

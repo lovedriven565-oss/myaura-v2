@@ -8,20 +8,30 @@ export default function Home() {
 
   // Session Recovery: if user closed the app mid-generation, resume automatically
   useEffect(() => {
-    const activeId = localStorage.getItem("myaura_active_gen");
+    const uid = (window as any).Telegram?.WebApp?.initDataUnsafe?.user?.id;
+    const key = uid ? `myaura_active_gen_${uid}` : "myaura_active_gen";
+    const activeId = localStorage.getItem(key);
     if (!activeId) return;
-    fetch(`/api/status/${activeId}`)
-      .then(r => r.json())
+    const statusUrl = uid ? `/api/status/${activeId}?tgUserId=${uid}` : `/api/status/${activeId}`;
+    fetch(statusUrl)
+      .then(async r => {
+        if (r.status === 403 || r.status === 404) {
+          localStorage.removeItem(key);
+          return null;
+        }
+        return r.json();
+      })
       .then(d => {
+        if (!d) return;
         if (d.status === "processing") {
           navigate(`/processing/${activeId}`, { replace: true });
         } else if (d.status === "completed" || d.status === "partial") {
           navigate(`/result/${activeId}`, { replace: true });
         } else {
-          localStorage.removeItem("myaura_active_gen");
+          localStorage.removeItem(key);
         }
       })
-      .catch(() => localStorage.removeItem("myaura_active_gen"));
+      .catch(() => localStorage.removeItem(key));
   }, [navigate]);
 
   return (

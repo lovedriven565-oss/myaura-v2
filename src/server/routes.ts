@@ -620,12 +620,29 @@ apiRouter.get("/status/:id", async (req, res, next) => {
 
     const { data: row, error } = await db
       .from("generations")
-      .select("id, status, result_path, result_paths, results_completed, results_failed, results_total, error_message, created_at")
+      .select("id, status, result_path, result_paths, results_completed, results_failed, results_total, error_message, created_at, telegram_user_id")
       .eq("id", id)
       .single();
 
     if (error || !row) {
       return res.status(404).json({ error: "Generation not found", code: "NOT_FOUND" });
+    }
+
+    // Owner check: if caller identifies themselves, validate ownership
+    const callerTgId = req.query.tgUserId as string | undefined;
+    if (callerTgId && row.telegram_user_id && String(row.telegram_user_id) !== String(callerTgId)) {
+      return res.status(403).json({ error: "Forbidden", code: "FORBIDDEN" });
+    }
+
+    // Auto-heal: server restart may have killed in-flight tasks leaving status stuck at "processing"
+    let currentStatus = row.status as string;
+    const completed = row.results_completed || 0;
+    const failed = row.results_failed || 0;
+    const total = row.results_total || 1;
+
+    if (currentStatus === "processing" && total > 0 && (completed + failed) >= total) {
+      currentStatus = completed > 0 ? "partial" : "failed";
+      await db.from("generations").update({ status: currentStatus }).eq("id", id);
     }
 
     const publicBaseUrl = process.env.R2_PUBLIC_BASE_URL || "";
@@ -634,13 +651,13 @@ apiRouter.get("/status/:id", async (req, res, next) => {
       ? row.result_paths.map((p: string) => `${publicBaseUrl}/${p}`) 
       : (resultUrl ? [resultUrl] : []);
 
-    const etaText = row.status === "processing"
-      ? computeEtaText(row.results_completed || 0, row.results_total || 1, row.created_at || null)
+    const etaText = currentStatus === "processing"
+      ? computeEtaText(completed, total, row.created_at || null)
       : null;
 
     res.json({
       id: row.id,
-      status: row.status,
+      status: currentStatus,
       resultUrl, // Legacy compat
       resultUrls, // New array format
       progress: {

@@ -18,7 +18,9 @@ export default function Result() {
   const [fullscreenUrl, setFullscreenUrl] = useState<string | null>(null);
 
   useEffect(() => {
-    localStorage.removeItem("myaura_active_gen");
+    const uid = (window as any).Telegram?.WebApp?.initDataUnsafe?.user?.id;
+    const key = uid ? `myaura_active_gen_${uid}` : "myaura_active_gen";
+    localStorage.removeItem(key);
     fetch(`/api/status/${id}`)
       .then((res) => res.json())
       .then((d: StatusData) => {

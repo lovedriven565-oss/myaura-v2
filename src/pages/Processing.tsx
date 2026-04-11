@@ -2,7 +2,15 @@ import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { Sparkles, Check, AlertTriangle } from "lucide-react";
 
-const ACTIVE_GEN_KEY = "myaura_active_gen";
+function getActiveGenKey(): string {
+  const uid = (window as any).Telegram?.WebApp?.initDataUnsafe?.user?.id;
+  return uid ? `myaura_active_gen_${uid}` : "myaura_active_gen";
+}
+
+function getTgUserId(): string | null {
+  const uid = (window as any).Telegram?.WebApp?.initDataUnsafe?.user?.id;
+  return uid ? String(uid) : null;
+}
 
 const PROCESSING_MESSAGES = [
   "Анализируем черты лица...",
@@ -36,22 +44,37 @@ export default function Processing() {
   }, []);
 
   useEffect(() => {
+    const tgUserId = getTgUserId();
+    const statusUrl = tgUserId ? `/api/status/${id}?tgUserId=${tgUserId}` : `/api/status/${id}`;
+
     const poll = setInterval(async () => {
       try {
-        const res = await fetch(`/api/status/${id}`);
+        const res = await fetch(statusUrl);
+
+        // 403 = stale/foreign session in localStorage → silently clean up and go home
+        if (res.status === 403) {
+          clearInterval(poll);
+          localStorage.removeItem(getActiveGenKey());
+          navigate("/", { replace: true });
+          return;
+        }
+
         const data = await res.json();
 
         if (data.progress) setProgress(data.progress);
         setStatus(data.status);
         setEtaText(data.etaText ?? null);
 
-        if (data.status === "completed" || data.status === "partial") {
+        const prog = data.progress || { completed: 0, failed: 0, total: 1 };
+        const allDone = prog.total > 0 && (prog.completed + prog.failed) >= prog.total;
+
+        if (data.status === "completed" || data.status === "partial" || (allDone && prog.completed > 0)) {
           clearInterval(poll);
-          localStorage.removeItem(ACTIVE_GEN_KEY);
+          localStorage.removeItem(getActiveGenKey());
           setTimeout(() => navigate(`/result/${id}`), 800);
-        } else if (data.status === "failed") {
+        } else if (data.status === "failed" || (allDone && prog.completed === 0)) {
           clearInterval(poll);
-          localStorage.removeItem(ACTIVE_GEN_KEY);
+          localStorage.removeItem(getActiveGenKey());
           alert("Ошибка генерации: " + (data.error || "Неизвестная ошибка"));
           navigate("/");
         }
