@@ -26,6 +26,7 @@ export default function UploadFree() {
   const [agreed, setAgreed] = useState(false);
   const [freeCredits, setFreeCredits] = useState(0);
   const [paidCredits, setPaidCredits] = useState(0);
+  const [ageTier, setAgeTier] = useState<"young" | "mature" | "distinguished">("young");
   const [balanceLoading, setBalanceLoading] = useState(true);
   const navigate = useNavigate();
   const { userId: tgUserId } = getTelegramIds();
@@ -90,6 +91,7 @@ export default function UploadFree() {
     formData.append("packageId", "free");
     formData.append("mode", "preview");
     formData.append("styleIds", JSON.stringify(["business"]));
+    formData.append("ageTier", ageTier);
     formData.append("telegramUserId", userId);
     if (chatId) formData.append("telegramChatId", chatId);
 
@@ -210,6 +212,31 @@ export default function UploadFree() {
             <p className="text-[14px] font-medium text-white/90">Без сильных фильтров и очков</p>
           </div>
         </section>
+
+        {/* Age Tier Selector */}
+        <div className="mb-8">
+          <p className="text-[12px] text-white/40 uppercase tracking-widest mb-3">Возрастной диапазон</p>
+          <div className="grid grid-cols-3 gap-2">
+            {([
+              { id: "young", label: "До 30 лет" },
+              { id: "mature", label: "30–50 лет" },
+              { id: "distinguished", label: "Старше 50" },
+            ] as const).map((tier) => (
+              <button
+                key={tier.id}
+                type="button"
+                onClick={() => setAgeTier(tier.id)}
+                className={`py-2.5 px-2 rounded-xl border text-[12px] font-medium transition-all duration-200 ${
+                  ageTier === tier.id
+                    ? 'border-[#c084fc] bg-[#c084fc]/10 text-[#e9d5ff]'
+                    : 'border-white/10 bg-white/[0.02] text-white/60 hover:bg-white/[0.04]'
+                }`}
+              >
+                {tier.label}
+              </button>
+            ))}
+          </div>
+        </div>
 
         <div className="mt-auto space-y-6">
           <label className="flex items-start gap-3 cursor-pointer group">

@@ -118,7 +118,7 @@ export function getGenerationConfig(packageId: PackageId): { concurrency: number
   const isFree = packageId === "free";
   return {
     concurrency: isFree ? 1 : parseInt(process.env.PREMIUM_CONCURRENCY || "3"),
-    delayMs: isFree ? 10_000 : parseInt(process.env.INTER_REQUEST_DELAY_MS || "5000"),
+    delayMs: isFree ? 10_000 : parseInt(process.env.INTER_REQUEST_DELAY_MS || "1000"),
   };
 }
 

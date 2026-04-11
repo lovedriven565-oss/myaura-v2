@@ -4,7 +4,7 @@ import { v4 as uuidv4 } from "uuid";
 import { getDb } from "./db.js";
 import { storage } from "./storage.js";
 import { aiProvider } from "./ai.js";
-import { buildPrompt, StyleId } from "./prompts.js";
+import { buildPrompt, StyleId, AgeTier } from "./prompts.js";
 import { validatePackageInput, buildStyleSchedule, buildStyleScheduleWithCount, runBatched, getGenerationConfig, PACKAGES } from "./packages.js";
 import { deliverTelegramPhoto, deliverTelegramResults } from "./telegram.js";
 import { selectBestReferencePhotos } from "./inputCuration.js";
@@ -320,6 +320,11 @@ apiRouter.post("/generate",
     // mode: 'premium' = only paid_credits; 'preview' = free first, then paid
     const mode: "premium" | "preview" = (req.body.mode === "premium") ? "premium" : "preview";
 
+    // Age tier for adaptive skin & lighting prompts
+    const validAgeTiers = ["young", "mature", "distinguished"];
+    const ageTier: AgeTier = validAgeTiers.includes(req.body.ageTier) ? req.body.ageTier as AgeTier : "young";
+    console.log(`[${id}] ageTier=${ageTier}`);
+
     if (telegramUserId) {
       const { data: user, error: userError } = await db
         .from("users")
@@ -446,7 +451,7 @@ apiRouter.post("/generate",
           console.warn(`[${id}] Image ${index}: Invalid styleId "${styleId}", falling back to business`);
         }
         console.log(`[${id}] Image ${index}: Generating with style="${validStyleId}", tier="${config.promptTier}"`);
-        const { prompt, negativePrompt } = buildPrompt(config.promptTier, validStyleId, index);
+        const { prompt, negativePrompt } = buildPrompt(config.promptTier, validStyleId, index, ageTier);
 
         let resultBase64 = await aiProvider.generateImage(base64Image, mimeType, prompt, mode, additionalImages);
         let resultBuffer = Buffer.from(resultBase64, "base64");

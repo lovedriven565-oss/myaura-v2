@@ -174,8 +174,8 @@ NATURAL COMPLIMENTARY LIGHTING:
 }
 
 // Legacy adapter for existing code
-export function buildPrompt(type: PromptType, styleId: StyleId, index: number = 0): { prompt: string; negativePrompt: string } {
-  const profile = buildPromptProfile(styleId, type, index);
+export function buildPrompt(type: PromptType, styleId: StyleId, index: number = 0, ageTier: AgeTier = "young"): { prompt: string; negativePrompt: string } {
+  const profile = buildPromptProfile(styleId, type, index, ageTier);
   return {
     prompt: profile.positivePrompt,
     negativePrompt: profile.negativePrompt
