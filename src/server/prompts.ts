@@ -22,11 +22,10 @@ const LIGHTING_BY_AGE: Record<AgeTier, string> = {
 
 const IDENTITY_LOCK_MALE = `
 PRIORITY 0: Exact 1:1 biometric facial match of the reference person.
-- STRUCTURAL LOCK: Authentic hairline position, temporal peaks, specific jaw width, and original gonial angle.
-- OPTICAL BYPASS: Retain the exact facial width-to-height ratio from the reference image. Do not apply focal flattening to the facial geometry. Maintain the natural narrowing of the lower jaw.
-- ASYMMETRY ANCHOR: Strictly preserve the natural micro-asymmetry of the nasal bridge, nostrils, and lip commissures. Do not mirror or average facial halves.
-- OCULAR AUTHENTICITY: 1:1 replication of the reference iris shape, upper eyelid exposure, and natural periorbital folds. Genuine, relaxed gaze; completely disable idealized model stare.
-- SKIN & HOLLOWS: Preserve sub-malar topography and zygomatic definition. Do not soften features, fill hollows, or lower the hairline.
+- STRUCTURAL LOCK: Authentic hairline position and temporal peaks. Preserve the natural, narrower jaw width from the reference (DO NOT artificially widen or square the jaw).
+- YOUTH & VITALITY: Keep the face looking well-rested, firm, and healthy. DO NOT add artificial age, deep hollows, or harsh shadows under the cheekbones. Preserve natural, healthy volume.
+- OPTICAL BYPASS: Retain the exact facial width-to-height ratio from the reference image. Bypass focal flattening.
+- ASYMMETRY & EYES: Genuine, relaxed gaze. Preserve subtle natural asymmetry.
 `;
 
 const IDENTITY_LOCK_FEMALE = `
@@ -44,12 +43,19 @@ PRIORITY 0: Exact 1:1 biometric facial match of the reference person.
 - OPTICAL BYPASS: Retain the exact facial width-to-height ratio from the reference image. Do not apply focal flattening or lens-induced geometry distortion to facial features.
 - ASYMMETRY ANCHOR: Strictly preserve natural micro-asymmetry of the nasal bridge, nostrils, and lip commissures. Do not mirror or average facial halves.
 - OCULAR AUTHENTICITY: 1:1 replication of iris shape, eyelid structure, and periorbital geometry. Authentic, relaxed gaze; disable idealized model stare.
-- VOLUME: Preserve natural facial volume, sub-malar topography, and cheek fullness without over-smoothing or artificial filling.
+- VOLUME: Preserve natural facial volume and cheek fullness without over-smoothing or artificial filling.
 `;
+
+// ─── Gender-Specific Skin Texture Maps ──────────────────────────────────────────
+const SKIN_TEXTURE_MALE: Record<AgeTier, string> = {
+  "young": "Healthy, supple male skin with subtle micro-pores and natural radiance. Even tone, clean and fresh.",
+  "mature": "Healthy male skin, natural firmness, subtle micro-pores. Clean and well-rested appearance. DO NOT add heavy wrinkles, eye bags, or exaggerated character lines.",
+  "distinguished": "Distinguished mature male skin with healthy texture and subtle authentic character. Visible pores. DO NOT add deep hollows, sunken cheeks, or excessive wrinkles."
+};
 
 // ─── Enhanced Negative Prompts (Archetype & Optics Killers) ─────────────────
 
-const MALE_SPECIFIC_NEGATIVE = "gigachad, chad, male model archetype, stock-photo CEO, artificially squared jaw, widened face, focal distortion on face, lowered hairline, plastic skin, beauty filter, botox look, over-filled cheeks, perfectly symmetrical, mirrored face, cgi, 3d render, dead eyes, model stare";
+const MALE_SPECIFIC_NEGATIVE = "gigachad, chad, male model archetype, stock-photo CEO, artificially squared jaw, widened face, focal distortion on face, lowered hairline, plastic skin, beauty filter, botox look, over-filled cheeks, perfectly symmetrical, mirrored face, cgi, 3d render, dead eyes, model stare, sub-malar hollows, sunken cheeks, deep nasolabial folds, heavy eye bags, gaunt face, exhausted look, harsh cheekbone shadows";
 
 const FEMALE_SPECIFIC_NEGATIVE = "instagram face, heavy makeup look, over-smoothed skin, plastic texture, cartoonish features, extreme symmetry, perfectly mirrored face, focal distortion on face, generic model stare";
 
@@ -85,7 +91,7 @@ interface StyleConfig {
 
 export const PROMPT_STYLES_V2: Record<StyleId, StyleConfig> = {
   "business": {
-    promptModifier: "WARDROBE: Navy wool blazer, white textured cotton shirt. STYLE: Modern executive portrait in a high-end minimalist office with glass partitions. Lighting: Loop lighting with soft fill-light to maintain facial fullness. Focus on competence and approachable presence.",
+    promptModifier: "WARDROBE: Navy wool blazer, white textured cotton shirt. STYLE: Modern executive portrait in a high-end minimalist office with glass partitions. Lighting: Soft-box front lighting to maintain a fresh, well-rested appearance. Avoid harsh dramatic shadows on the face. Focus on competence and approachable presence.",
     negativePrompt: "original clothing textures, previous outfit from reference, same garment as input photo, stiff flat lighting, waxy skin, plastic face texture, exaggerated wrinkles, dark under-eye shadows",
     retouchPolicy: "natural_texture",
     lightingPolicy: "controlled_soft_studio",
@@ -131,6 +137,7 @@ export const PROMPT_STYLES_V2: Record<StyleId, StyleConfig> = {
 export function buildPromptProfile(styleId: StyleId, mode: PromptType, index: number = 0, ageTier: AgeTier = "young", gender: Gender = "unset"): { positivePrompt: string; negativePrompt: string; debugPromptParts: any } {
   const identityLockHeader = gender === "male" ? IDENTITY_LOCK_MALE : gender === "female" ? IDENTITY_LOCK_FEMALE : IDENTITY_LOCK_NEUTRAL;
   const genderSpecificNegative = gender === "male" ? MALE_SPECIFIC_NEGATIVE : gender === "female" ? FEMALE_SPECIFIC_NEGATIVE : NEUTRAL_SPECIFIC_NEGATIVE;
+  const skinTexture = gender === "male" ? SKIN_TEXTURE_MALE[ageTier] : SKIN_TEXTURE_BY_AGE[ageTier];
   const isPremium = mode === "premium";
   const layerPrompt = isPremium ? PREMIUM_LAYER : FREE_PREVIEW_LAYER;
   const styleConfig = PROMPT_STYLES_V2[styleId] || PROMPT_STYLES_V2["business"];
@@ -153,7 +160,7 @@ export function buildPromptProfile(styleId: StyleId, mode: PromptType, index: nu
   const dynamicIdentityCore = `
 CRITICAL IDENTITY & VITALITY:
 - BIOMETRICS: Preserve exact facial geometry. Keep the face looking well-rested and energetic.
-- SKIN TEXTURE: ${SKIN_TEXTURE_BY_AGE[ageTier]}
+- SKIN TEXTURE: ${skinTexture}
 - EYES & EXPRESSION: Confident, clear eyes with bright catchlights. Natural relaxed presence.
   `.trim();
 
