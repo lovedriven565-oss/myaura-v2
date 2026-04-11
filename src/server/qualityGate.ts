@@ -42,10 +42,15 @@ async function multimodalJudge(
   style: string
 ): Promise<QualityScore | null> {
   try {
+    // Quality judge always uses Gemini API directly (not Vertex AI).
+    // Vertex AI requires regional endpoints + specific versioned model names
+    // (e.g. gemini-1.5-flash-001 in us-central1), which differ from Gemini API.
+    // If GEMINI_API_KEY is absent, we skip to rule_based_fallback.
+    const geminiKey = process.env.GEMINI_API_KEY;
+    if (!geminiKey) return null;
+
     const { GoogleGenAI } = await import("@google/genai");
-    const ai = process.env.USE_VERTEX_AI === "true"
-      ? new GoogleGenAI({})
-      : new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    const ai = new GoogleGenAI({ apiKey: geminiKey });
 
     const evaluationPrompt = `You are a professional portrait photography quality judge specializing in identity preservation.
 Compare the REFERENCE photo (first image) with the GENERATED photo (second image).
@@ -63,7 +68,7 @@ Respond ONLY with a JSON object, no markdown, no explanation:
 {"likeness":N,"ageDrift":N,"skinRealism":N,"eyeConsistency":N,"premiumLook":N,"expressionScore":N}`;
 
     const response = await ai.models.generateContent({
-      model: "gemini-1.5-flash",
+      model: "gemini-2.0-flash",
       contents: [
         { inlineData: { data: referenceBase64, mimeType } },
         { inlineData: { data: generatedBase64, mimeType } },

@@ -125,8 +125,8 @@ export function getGenerationConfig(packageId: PackageId): { concurrency: number
 // Retry wrapper with exponential backoff for 429 rate limit errors
 async function withRetry<R>(
   fn: () => Promise<R>,
-  maxRetries: number = 3,
-  baseDelayMs: number = 20_000
+  maxRetries: number = 2,
+  baseDelayMs: number = 5_000
 ): Promise<R> {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
@@ -137,13 +137,13 @@ async function withRetry<R>(
                     error?.message?.includes("RESOURCE_EXHAUSTED");
 
       if (is429 && attempt < maxRetries) {
-        const delay = baseDelayMs * Math.pow(2, attempt); // 20s, 40s, 80s
+        const delay = baseDelayMs * Math.pow(2, attempt); // 5s, 10s
         console.warn(`Rate limited (429), retrying in ${delay / 1000}s (attempt ${attempt + 1}/${maxRetries})`);
         await new Promise(r => setTimeout(r, delay));
         continue;
       }
       if (is429) {
-        throw new Error("Google Cloud Quota reached. Please wait a few minutes.");
+        throw new Error("Google Cloud Quota reached. Please try again in a moment.");
       }
       throw error;
     }
