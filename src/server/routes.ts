@@ -15,7 +15,7 @@ export const apiRouter = Router();
 
 // ─── Telegram initData Validation (Security) ─────────────────────────────────
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
-const INIT_DATA_MAX_AGE_SECONDS = 300; // 5 minutes replay protection
+const INIT_DATA_MAX_AGE_SECONDS = 86400; // 24 hours — Telegram refreshes initData per session launch
 
 /**
  * Validates Telegram Mini App initData using HMAC-SHA256
@@ -173,6 +173,40 @@ function initDataAuthMiddleware(req: any, res: any, next: any) {
 // Apply initData auth middleware to all API routes
 apiRouter.use(initDataAuthMiddleware);
 
+// ─── Per-user Generation Rate Limiter ────────────────────────────────────────
+const _genRateMap = new Map<number, number>(); // userId → last generation timestamp (ms)
+const GENERATION_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes per user
+
+function generationRateLimitMiddleware(req: any, res: any, next: any) {
+  const telegramUserId = parseInt(req.body?.telegramUserId, 10);
+  if (!telegramUserId || isNaN(telegramUserId)) return next();
+
+  const now = Date.now();
+  const lastGen = _genRateMap.get(telegramUserId);
+
+  if (lastGen && (now - lastGen) < GENERATION_COOLDOWN_MS) {
+    const waitSec = Math.ceil((GENERATION_COOLDOWN_MS - (now - lastGen)) / 1000);
+    console.warn(`[RateLimit] userId=${telegramUserId} blocked, retry in ${waitSec}s`);
+    return res.status(429).json({
+      error: `Слишком много запросов. Подождите ${waitSec} секунд.`,
+      code: "RATE_LIMITED",
+      retryAfter: waitSec
+    });
+  }
+
+  _genRateMap.set(telegramUserId, now);
+
+  // Evict stale entries to prevent memory leak
+  if (_genRateMap.size > 5000) {
+    const cutoff = now - GENERATION_COOLDOWN_MS * 5;
+    for (const [uid, ts] of _genRateMap) {
+      if (ts < cutoff) _genRateMap.delete(uid);
+    }
+  }
+
+  next();
+}
+
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB limit per file
 
 const ALLOWED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]);
@@ -193,7 +227,8 @@ function isValidImageBuffer(buf: Buffer, declaredMime: string): boolean {
 }
 
 // 1. Upload & Start Generation (Supports single file for 'free' and multiple for 'premium')
-apiRouter.post("/generate", 
+apiRouter.post("/generate",
+  generationRateLimitMiddleware,
   upload.fields([{ name: "images", maxCount: 15 }]),
   async (req, res, next) => {
     try {
@@ -506,6 +541,14 @@ apiRouter.post("/generate",
 
       // Cleanup quality gate reroll tracking
       clearRerollTracking(id);
+
+      // Delete original reference photos from R2 (biometric data retention hygiene)
+      try {
+        await Promise.all(originalPaths.map(p => storage.delete(p)));
+        console.log(`[${id}] Cleaned up ${originalPaths.length} original file(s) from R2`);
+      } catch (cleanupErr: any) {
+        console.error(`[${id}] R2 cleanup error: ${cleanupErr.message}`);
+      }
 
       // Final Telegram delivery: only for free/preview (1 image).
       // Premium images are already delivered progressively per-image above.
