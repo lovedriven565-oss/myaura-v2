@@ -428,6 +428,9 @@ apiRouter.post("/generate",
         ? curatedFiles.slice(1).map(file => file.buffer.toString("base64"))
         : [];
 
+      // Session isolation trace: confirm closure variables are bound to this session only
+      console.log(`[${id}] SESSION CONTEXT: userId=${telegramUserId}, refs=${curatedFiles.length}, base64Len=${base64Image.length}, additionalRefs=${additionalImages.length}`);
+
       // Progressive state tracking
       let completedCount = 0;
       let failedCount = 0;

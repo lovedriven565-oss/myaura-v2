@@ -38,7 +38,10 @@ export class R2Storage implements IStorage {
 
   async save(fileBuffer: Buffer, originalName: string, type: "original" | "result"): Promise<string> {
     const ext = path.extname(originalName) || ".jpg";
-    const filename = `${type}_${uuidv4()}${ext}`;
+    // Include originalName prefix for auditability (generationId embedded by callers)
+    // Sanitize to alphanumeric/dash/underscore only to prevent path traversal
+    const safePrefix = originalName.replace(/[^a-zA-Z0-9_\-]/g, "_").slice(0, 80);
+    const filename = `${type}/${safePrefix}_${uuidv4()}${ext}`;
     
     // Determine content type
     let contentType = "image/jpeg";
