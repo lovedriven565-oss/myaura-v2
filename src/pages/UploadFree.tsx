@@ -27,6 +27,7 @@ export default function UploadFree() {
   const [freeCredits, setFreeCredits] = useState(0);
   const [paidCredits, setPaidCredits] = useState(0);
   const [ageTier, setAgeTier] = useState<"young" | "mature" | "distinguished">("young");
+  const [gender, setGender] = useState<"male" | "female" | "unset">("unset");
   const [balanceLoading, setBalanceLoading] = useState(true);
   const navigate = useNavigate();
   const { userId: tgUserId } = getTelegramIds();
@@ -92,6 +93,7 @@ export default function UploadFree() {
     formData.append("mode", "preview");
     formData.append("styleIds", JSON.stringify(["business"]));
     formData.append("ageTier", ageTier);
+    formData.append("gender", gender);
     formData.append("telegramUserId", userId);
     if (chatId) formData.append("telegramChatId", chatId);
 
@@ -217,7 +219,7 @@ export default function UploadFree() {
         </section>
 
         {/* Age Tier Selector */}
-        <div className="mb-8">
+        <div className="mb-5">
           <p className="text-[12px] text-white/40 uppercase tracking-widest mb-3">Возрастной диапазон</p>
           <div className="grid grid-cols-3 gap-2">
             {([
@@ -236,6 +238,31 @@ export default function UploadFree() {
                 }`}
               >
                 {tier.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Gender Selector */}
+        <div className="mb-8">
+          <p className="text-[12px] text-white/40 uppercase tracking-widest mb-3">Пол</p>
+          <div className="grid grid-cols-3 gap-2">
+            {([
+              { id: "male", label: "Мужской" },
+              { id: "female", label: "Женский" },
+              { id: "unset", label: "Не указан" },
+            ] as const).map((g) => (
+              <button
+                key={g.id}
+                type="button"
+                onClick={() => setGender(g.id)}
+                className={`py-2.5 px-2 rounded-xl border text-[12px] font-medium transition-all duration-200 ${
+                  gender === g.id
+                    ? 'border-[#c084fc] bg-[#c084fc]/10 text-[#e9d5ff]'
+                    : 'border-white/10 bg-white/[0.02] text-white/60 hover:bg-white/[0.04]'
+                }`}
+              >
+                {g.label}
               </button>
             ))}
           </div>

@@ -78,6 +78,8 @@ export default function UploadPremium() {
 
   const [ageTier, setAgeTier] = useState<"young" | "mature" | "distinguished">("young");
 
+  const [gender, setGender] = useState<"male" | "female" | "unset">("unset");
+
   const [loading, setLoading] = useState(false);
 
   const [error, setError] = useState("");
@@ -350,6 +352,8 @@ export default function UploadPremium() {
 
     formData.append("ageTier", ageTier);
 
+    formData.append("gender", gender);
+
     formData.append("telegramUserId", userId);
 
     if (chatId) formData.append("telegramChatId", chatId);
@@ -573,7 +577,7 @@ export default function UploadPremium() {
 
 
         {/* Age Tier Selector */}
-        <div className="mb-10">
+        <div className="mb-6">
           <h2 className="text-[13px] font-medium tracking-widest uppercase text-white/50 mb-4">Возрастной диапазон</h2>
           <div className="grid grid-cols-3 gap-2">
             {([
@@ -592,6 +596,31 @@ export default function UploadPremium() {
                 }`}
               >
                 {tier.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Gender Selector */}
+        <div className="mb-10">
+          <h2 className="text-[13px] font-medium tracking-widest uppercase text-white/50 mb-4">Пол</h2>
+          <div className="grid grid-cols-3 gap-2">
+            {([
+              { id: "male", label: "Мужской" },
+              { id: "female", label: "Женский" },
+              { id: "unset", label: "Не указан" },
+            ] as const).map((g) => (
+              <button
+                key={g.id}
+                type="button"
+                onClick={() => setGender(g.id)}
+                className={`py-3 px-2 rounded-xl border text-[13px] font-medium transition-all duration-200 ${
+                  gender === g.id
+                    ? 'border-[#c084fc] bg-[#c084fc]/10 text-[#e9d5ff]'
+                    : 'border-white/10 bg-white/[0.02] text-white/60 hover:bg-white/[0.04]'
+                }`}
+              >
+                {g.label}
               </button>
             ))}
           </div>

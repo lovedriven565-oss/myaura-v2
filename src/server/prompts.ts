@@ -3,6 +3,7 @@ import { evaluatePromptQuality } from "./qualityGate.js";
 export type PromptType = "free" | "premium";
 export type StyleId = "business" | "lifestyle" | "aura" | "cinematic" | "luxury" | "editorial";
 export type AgeTier = "young" | "mature" | "distinguished";
+export type Gender = "male" | "female" | "unset";
 
 // ─── Age-Adaptive Skin & Lighting Dictionaries ──────────────────────────────────
 const SKIN_TEXTURE_BY_AGE: Record<AgeTier, string> = {
@@ -17,10 +18,42 @@ const LIGHTING_BY_AGE: Record<AgeTier, string> = {
   "distinguished": "Paramount butterfly lighting to lift facial features and fill recesses softly."
 };
 
-// ─── Identity Lock Header ────────────────────────────────────────────────────
-const IDENTITY_LOCK_HEADER = `
-PRIORITY 0: Exact 1:1 photorealistic match of the person in the provided reference image.
-Maintain exact facial volume, youthful eye-area structure, and natural cheek fullness.`;
+// ─── Gender-Adaptive Identity Headers (V4 - Ultra-Fidelity) ─────────────────
+
+const IDENTITY_LOCK_MALE = `
+PRIORITY 0: Exact 1:1 biometric facial match of the reference person.
+- STRUCTURAL LOCK: Authentic hairline position, temporal peaks, specific jaw width, and original gonial angle.
+- OPTICAL BYPASS: Retain the exact facial width-to-height ratio from the reference image. Do not apply focal flattening to the facial geometry. Maintain the natural narrowing of the lower jaw.
+- ASYMMETRY ANCHOR: Strictly preserve the natural micro-asymmetry of the nasal bridge, nostrils, and lip commissures. Do not mirror or average facial halves.
+- OCULAR AUTHENTICITY: 1:1 replication of the reference iris shape, upper eyelid exposure, and natural periorbital folds. Genuine, relaxed gaze; completely disable idealized model stare.
+- SKIN & HOLLOWS: Preserve sub-malar topography and zygomatic definition. Do not soften features, fill hollows, or lower the hairline.
+`;
+
+const IDENTITY_LOCK_FEMALE = `
+PRIORITY 0: Exact 1:1 biometric facial match of the reference person.
+- STRUCTURAL LOCK: Original biometric facial geometry, jawline curvature, and chin proportions.
+- OPTICAL BYPASS: Retain the exact facial width-to-height ratio from the reference. Bypass focal flattening on facial features.
+- ASYMMETRY ANCHOR: Preserve unique feature alignment and subtle natural asymmetry of the nose and lips.
+- OCULAR AUTHENTICITY: Exact replication of eyelid structure and iris geometry. Authentic, natural gaze.
+- VOLUME: Maintain natural facial volume and authentic cheek fullness without over-inflation.
+`;
+
+const IDENTITY_LOCK_NEUTRAL = `
+PRIORITY 0: Exact 1:1 biometric facial match of the reference person.
+- STRUCTURAL LOCK: Authentic hairline, original facial geometry, jaw width, and chin proportions.
+- OPTICAL BYPASS: Retain the exact facial width-to-height ratio from the reference image. Do not apply focal flattening or lens-induced geometry distortion to facial features.
+- ASYMMETRY ANCHOR: Strictly preserve natural micro-asymmetry of the nasal bridge, nostrils, and lip commissures. Do not mirror or average facial halves.
+- OCULAR AUTHENTICITY: 1:1 replication of iris shape, eyelid structure, and periorbital geometry. Authentic, relaxed gaze; disable idealized model stare.
+- VOLUME: Preserve natural facial volume, sub-malar topography, and cheek fullness without over-smoothing or artificial filling.
+`;
+
+// ─── Enhanced Negative Prompts (Archetype & Optics Killers) ─────────────────
+
+const MALE_SPECIFIC_NEGATIVE = "gigachad, chad, male model archetype, stock-photo CEO, artificially squared jaw, widened face, focal distortion on face, lowered hairline, plastic skin, beauty filter, botox look, over-filled cheeks, perfectly symmetrical, mirrored face, cgi, 3d render, dead eyes, model stare";
+
+const FEMALE_SPECIFIC_NEGATIVE = "instagram face, heavy makeup look, over-smoothed skin, plastic texture, cartoonish features, extreme symmetry, perfectly mirrored face, focal distortion on face, generic model stare";
+
+const NEUTRAL_SPECIFIC_NEGATIVE = "model archetype face, focal distortion on face, artificially widened face, over-filled cheeks, perfectly symmetrical, mirrored face, plastic skin, beauty filter, botox look, dead eyes, model stare, cgi, 3d render";
 
 const FREE_PREVIEW_LAYER = `
 PREVIEW RESULT REQUIREMENTS:
@@ -95,7 +128,9 @@ export const PROMPT_STYLES_V2: Record<StyleId, StyleConfig> = {
   }
 };
 
-export function buildPromptProfile(styleId: StyleId, mode: PromptType, index: number = 0, ageTier: AgeTier = "young"): { positivePrompt: string; negativePrompt: string; debugPromptParts: any } {
+export function buildPromptProfile(styleId: StyleId, mode: PromptType, index: number = 0, ageTier: AgeTier = "young", gender: Gender = "unset"): { positivePrompt: string; negativePrompt: string; debugPromptParts: any } {
+  const identityLockHeader = gender === "male" ? IDENTITY_LOCK_MALE : gender === "female" ? IDENTITY_LOCK_FEMALE : IDENTITY_LOCK_NEUTRAL;
+  const genderSpecificNegative = gender === "male" ? MALE_SPECIFIC_NEGATIVE : gender === "female" ? FEMALE_SPECIFIC_NEGATIVE : NEUTRAL_SPECIFIC_NEGATIVE;
   const isPremium = mode === "premium";
   const layerPrompt = isPremium ? PREMIUM_LAYER : FREE_PREVIEW_LAYER;
   const styleConfig = PROMPT_STYLES_V2[styleId] || PROMPT_STYLES_V2["business"];
@@ -129,7 +164,7 @@ NATURAL COMPLIMENTARY LIGHTING:
   `.trim();
 
   const debugPromptParts = {
-    identityLockHeader: IDENTITY_LOCK_HEADER.trim(),
+    identityLockHeader: identityLockHeader.trim(),
     identityCore: dynamicIdentityCore,
     layerMode: layerPrompt.trim(),
     styleModifier: styleConfig.promptModifier,
@@ -152,7 +187,8 @@ NATURAL COMPLIMENTARY LIGHTING:
   ].filter(Boolean).join("\n\n");
 
   const finalNegativePrompt = [
-    "different person, generic female face, generic male face, archetype face, celebrity lookalike, facial reconstruction",
+    genderSpecificNegative,
+    "different person, celebrity lookalike, facial reconstruction",
     "nasolabial folds, crow's feet, under-eye bags, forehead wrinkles, hollow cheeks, saggy skin",
     "oily skin, red skin, acne scars, hyper-pigmentation, sunburned skin, rough texture, sharp micro-contrast",
     "sadness, exhaustion, anger, tense face, squinting eyes",
@@ -174,8 +210,8 @@ NATURAL COMPLIMENTARY LIGHTING:
 }
 
 // Legacy adapter for existing code
-export function buildPrompt(type: PromptType, styleId: StyleId, index: number = 0, ageTier: AgeTier = "young"): { prompt: string; negativePrompt: string } {
-  const profile = buildPromptProfile(styleId, type, index, ageTier);
+export function buildPrompt(type: PromptType, styleId: StyleId, index: number = 0, ageTier: AgeTier = "young", gender: Gender = "unset"): { prompt: string; negativePrompt: string } {
+  const profile = buildPromptProfile(styleId, type, index, ageTier, gender);
   return {
     prompt: profile.positivePrompt,
     negativePrompt: profile.negativePrompt
