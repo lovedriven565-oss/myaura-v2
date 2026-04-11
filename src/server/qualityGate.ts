@@ -231,3 +231,60 @@ export function clearRerollTracking(generationId: string) {
     }
   }
 }
+
+// ─── Prompt Quality Linter ────────────────────────────────────────────────────
+
+export interface PromptQualityScore {
+  likeness: number;
+  agePreservation: number;
+  skinQuality: number;
+  warnings: string[];
+}
+
+/**
+ * Static analysis linter for prompt quality.
+ * Scores the positive/negative prompts before generation to catch known risks.
+ */
+export function evaluatePromptQuality(positivePrompt: string, negativePrompt: string): PromptQualityScore {
+  const pos = positivePrompt.toLowerCase();
+  const scores: PromptQualityScore = { likeness: 5, agePreservation: 5, skinQuality: 5, warnings: [] };
+
+  // Optics (Likeness)
+  if (pos.includes("85mm") || pos.includes("medium format")) scores.likeness += 3;
+  if (pos.includes("24mm") || pos.includes("wide angle")) {
+    scores.likeness -= 3;
+    scores.warnings.push("Wide angle lens (24mm) detected: risk of facial distortion.");
+  }
+
+  // Lighting (AgePreservation)
+  if (pos.includes("chiaroscuro") || pos.includes("dramatic shadow") || pos.includes("hard light")) {
+    scores.agePreservation -= 3;
+    scores.warnings.push("Hard shadows/Chiaroscuro detected: high risk of artificial aging.");
+  }
+  if (pos.includes("volumetric light") || pos.includes("butterfly lighting") || pos.includes("loop lighting") || pos.includes("fill light")) {
+    scores.agePreservation += 3;
+    scores.skinQuality += 1;
+  }
+
+  // Skin (SkinQuality)
+  if (pos.includes("perfect skin") || pos.includes("flawless") || pos.includes("smooth skin")) {
+    scores.skinQuality -= 4;
+    scores.likeness -= 2;
+    scores.warnings.push("Beautification tokens detected: risk of plastic/mannequin effect.");
+  }
+  if (pos.includes("supple skin") || pos.includes("natural pores") || pos.includes("vellus hair")) {
+    scores.skinQuality += 4;
+    scores.agePreservation += 2;
+  }
+
+  // Eyes / Vitality
+  if (pos.includes("catchlights") || pos.includes("vitality")) scores.agePreservation += 2;
+
+  // Clamp scores to 1-10
+  const clamp = (n: number) => Math.max(1, Math.min(10, n));
+  scores.likeness = clamp(scores.likeness);
+  scores.agePreservation = clamp(scores.agePreservation);
+  scores.skinQuality = clamp(scores.skinQuality);
+
+  return scores;
+}

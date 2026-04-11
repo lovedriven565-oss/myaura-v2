@@ -1,3 +1,5 @@
+import { evaluatePromptQuality } from "./qualityGate.js";
+
 export type PromptType = "free" | "premium";
 export type StyleId = "business" | "lifestyle" | "aura" | "cinematic" | "luxury" | "editorial";
 
@@ -51,42 +53,42 @@ interface StyleConfig {
 
 export const PROMPT_STYLES_V2: Record<StyleId, StyleConfig> = {
   "business": {
-    promptModifier: "WARDROBE: High-end tailored corporate suit, crisp collar, expensive fabric. STYLE: confident, refined, approachable professional presence. Strong but friendly, clean premium skin without temporary blemishes, healthy polished appearance, balanced studio light that flatters the face.",
+    promptModifier: "WARDROBE: Navy wool blazer, white textured cotton shirt. STYLE: Modern executive portrait in a high-end minimalist office with glass partitions. Lighting: Loop lighting with soft fill-light to maintain facial fullness. Focus on competence and approachable presence.",
     negativePrompt: "NO unchanged input clothing in premium mode, NO cold corporate passport look, NO overly stiff or gray lifeless face, NO age exaggeration from seriousness.",
     retouchPolicy: "natural_texture",
     lightingPolicy: "controlled_soft_studio",
     styleRisk: "safe"
   },
   "lifestyle": {
-    promptModifier: "WARDROBE: Elegant expensive casual wear, light breathable premium fabrics, effortless chic. STYLE: natural premium lifestyle portrait, soft natural daylight, elegant expensive environment, attractive but authentic real-person look, fresh natural appearance.",
+    promptModifier: "WARDROBE: Beige cashmere knitwear, tailored trousers. STYLE: Candid lifestyle photography during golden hour on an hotel terrace in the Alps. Lighting: Warm backlight with a soft rim-light on hair. Natural skin texture with healthy radiance. 50mm lens look.",
     negativePrompt: "NO unchanged input clothing in premium mode, NO influencer filter look, NO fake glossy skin, NO over-retouched casual portrait.",
     retouchPolicy: "clean_natural",
     lightingPolicy: "soft_daylight",
     styleRisk: "safe"
   },
   "cinematic": {
-    promptModifier: "WARDROBE: High-end textured cinematic layers. STYLE: Modern cinematic portrait. Use soft volumetric key light. Focus on vitality and presence. The face must be clearly illuminated to preserve all identity markers from the reference image. NO heavy shadows on the face, NO grit-induced aging.",
+    promptModifier: "STYLE: Cinematic film still shot on 35mm. Soft volumetric key light filling facial recesses. Professional teal and orange color grading with deep but detailed blacks. Intense eyes with sharp catchlights. No shadow-induced aging.",
     negativePrompt: "different person, generic man face, deep facial lines, sunken eyes, heavy eye bags, rough skin, weathered face, older version of subject, tired look, dramatic chiaroscuro on skin, redness",
     retouchPolicy: "soft_natural_skin",
     lightingPolicy: "soft_volumetric_cinematic",
     styleRisk: "high"
   },
   "editorial": {
-    promptModifier: "WARDROBE: Avant-garde fashion styling, bold architectural garments, high-end magazine wardrobe. STYLE: high-end editorial portrait — editorial styling applies ONLY to wardrobe, lighting, and composition. Controlled premium retouch, sharp eyes, photorealistic epidermal detail, polished editorial finish without beauty filter, premium studio lighting. The face MUST stay 100% authentic to the reference person. Do NOT drift toward a generic fashion model or editorial archetype face.",
+    promptModifier: "WARDROBE: Avant-garde structured garment. STYLE: High-end fashion editorial shot on Hasselblad medium format. Lighting: Paramount butterfly lighting from a beauty dish. Dewy luminous skin texture, sharp focus on iris detail. Extreme 4K fidelity.",
     negativePrompt: "NO unchanged input clothing in premium mode, NO cheap glamour look, NO wax skin, NO over-airbrushed magazine face, NO face reconstruction toward model archetype, NO angular sharpening of facial structure.",
     retouchPolicy: "editorial_clean",
     lightingPolicy: "editorial_studio",
     styleRisk: "high"
   },
   "luxury": {
-    promptModifier: "WARDROBE: Expensive designer evening wear or ultra-premium smart casual, rich textures (silk, cashmere). STYLE: elegant luxury portrait, expensive, elegant, refined visual language, sophisticated light, tactile organic skin finish, high-status styling with realistic face detail. Apply luxury styling WITHOUT refining or sharpening facial structure to appear more aristocratic.",
+    promptModifier: "WARDROBE: Bespoke silk and cashmere layers. STYLE: Timeless elegance in a grand estate library. Polished mahogany and leather textures in background. Sophisticated soft-box lighting. Understated sophistication without artificial rejuvenation.",
     negativePrompt: "NO unchanged input clothing in premium mode, NO pristine porcelain skin, NO fake flawless skin, NO exaggerated glam filter, NO skin smoothing that erases natural texture.",
     retouchPolicy: "refined_clean",
     lightingPolicy: "luxury_soft",
     styleRisk: "medium"
   },
   "aura": {
-    promptModifier: "WARDROBE: Ethereal flowing fabrics, soft elegant drapes, artistic minimalist styling. STYLE: dreamy atmosphere but sharp face and clear eyes. Soft glowing background aura, glow in background / atmosphere ONLY (never over the face), clean premium skin with micro texture, beautiful mood.",
+    promptModifier: "STYLE: Meta-physical energy portrait. Iridescent light refraction and soft glowing aura emanating from the subject. Ethereal volumetric glow with pastel gradients. Face remains in sharp biometric focus while edges fade into dreamlike haze.",
     negativePrompt: "NO unchanged input clothing in premium mode, NO soft-focus blur on face, NO smeared skin, NO dreamy plastic face, NO glow over facial features, NO face softening beyond natural realism.",
     retouchPolicy: "soft_glow",
     lightingPolicy: "aura_diffused",
@@ -147,6 +149,13 @@ export function buildPromptProfile(styleId: StyleId, mode: PromptType, index: nu
     "sadness, exhaustion, anger, tense face, squinting eyes",
     styleConfig.negativePrompt
   ].join(", ");
+
+  const quality = evaluatePromptQuality(finalPrompt, finalNegativePrompt);
+  if (quality.likeness < 5 || quality.agePreservation < 5 || quality.skinQuality < 5) {
+    console.warn(`[QUALITY GATE WARNING] Style: ${styleId}. Scores: Likeness(${quality.likeness}/10), Age(${quality.agePreservation}/10), Skin(${quality.skinQuality}/10). Warnings: ${quality.warnings.join(' | ')}`);
+  } else {
+    console.log(`[QUALITY GATE PASS] Style: ${styleId}. Scores: Likeness(${quality.likeness}/10), Age(${quality.agePreservation}/10), Skin(${quality.skinQuality}/10)`);
+  }
 
   return {
     positivePrompt: finalPrompt,
