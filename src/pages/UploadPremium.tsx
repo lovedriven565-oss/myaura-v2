@@ -395,6 +395,7 @@ export default function UploadPremium() {
       if (!res.ok) throw new Error("Произошла ошибка при генерации. Попробуйте ещё раз.");
 
       // Async mode: server returns { id, status: "processing" }
+      localStorage.setItem("myaura_active_gen", data.id);
       navigate(`/processing/${data.id}`);
 
     } catch (err: any) {

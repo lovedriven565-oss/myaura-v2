@@ -1,9 +1,28 @@
-import { useState } from "react";
-import { Link } from "react-router-dom";
+import { useState, useEffect } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { Sparkles, Star, ArrowRight, ShieldCheck, Image as ImageIcon, Crown, MoveHorizontal } from "lucide-react";
 
 export default function Home() {
   const [sliderPos, setSliderPos] = useState(50);
+  const navigate = useNavigate();
+
+  // Session Recovery: if user closed the app mid-generation, resume automatically
+  useEffect(() => {
+    const activeId = localStorage.getItem("myaura_active_gen");
+    if (!activeId) return;
+    fetch(`/api/status/${activeId}`)
+      .then(r => r.json())
+      .then(d => {
+        if (d.status === "processing") {
+          navigate(`/processing/${activeId}`, { replace: true });
+        } else if (d.status === "completed" || d.status === "partial") {
+          navigate(`/result/${activeId}`, { replace: true });
+        } else {
+          localStorage.removeItem("myaura_active_gen");
+        }
+      })
+      .catch(() => localStorage.removeItem("myaura_active_gen"));
+  }, [navigate]);
 
   return (
     <div className="min-h-screen pb-32 bg-[#0a0a0a] text-white font-sans selection:bg-purple-500/30">

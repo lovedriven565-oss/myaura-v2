@@ -18,6 +18,7 @@ export default function Result() {
   const [fullscreenUrl, setFullscreenUrl] = useState<string | null>(null);
 
   useEffect(() => {
+    localStorage.removeItem("myaura_active_gen");
     fetch(`/api/status/${id}`)
       .then((res) => res.json())
       .then((d: StatusData) => {
