@@ -6,3 +6,5 @@ coverage/
 *.log
 .env*
 !.env.example
+keys/*.json
+!keys/dummy.json

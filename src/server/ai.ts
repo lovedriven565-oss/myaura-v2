@@ -1,5 +1,7 @@
 import { GoogleGenAI } from "@google/genai";
 import crypto from "crypto";
+import fs from "fs";
+import path from "path";
 import { swapFace } from "./faceswap.js";
 
 export interface IGenerationProvider {
@@ -56,28 +58,55 @@ async function withExponentialBackoff<T>(
 
 interface KeySlot {
   client: GoogleGenAI;
-  keyHint: string;       // last 6 chars for logging
+  keyPath: string;      // full path to JSON file for GOOGLE_APPLICATION_CREDENTIALS
+  keyHint: string;      // filename for logging
   cooldownUntil: number; // epoch ms — 0 means ready
 }
 
 const KEY_COOLDOWN_MS = 60_000; // cooldown 60s after a 429
 
 function buildKeyPool(): KeySlot[] {
-  const raw = process.env.VERTEX_API_KEYS || "";
-  const keys = raw.split(",").map(k => k.trim()).filter(Boolean);
+  const keysDir = path.resolve(process.cwd(), 'keys');
+  console.log(`[KeyPool] Scanning ${keysDir}...`);
 
-  if (keys.length > 0) {
-    console.log(`[KeyPool] Loaded ${keys.length} key(s) for round-robin rotation`);
-    return keys.map(key => ({
-      client: new GoogleGenAI({ apiKey: key }),
-      keyHint: key.slice(-6),
-      cooldownUntil: 0,
-    }));
+  if (!fs.existsSync(keysDir)) {
+    console.warn("[KeyPool] keys folder does not exist — using single ADC client");
+    return [{ client: new GoogleGenAI({}), keyPath: "", keyHint: "adc", cooldownUntil: 0 }];
   }
 
-  // Fallback: single ADC client (existing Vertex AI behavior via env vars)
-  console.log("[KeyPool] No VERTEX_API_KEYS — using single ADC client");
-  return [{ client: new GoogleGenAI({}), keyHint: "adc", cooldownUntil: 0 }];
+  const files = fs.readdirSync(keysDir);
+  const jsonFiles = files.filter(f => f.endsWith('.json') && f !== 'dummy.json');
+
+  if (jsonFiles.length === 0) {
+    console.warn("[KeyPool] No JSON keys found (excluding dummy.json) — using single ADC client");
+    return [{ client: new GoogleGenAI({}), keyPath: "", keyHint: "adc", cooldownUntil: 0 }];
+  }
+
+  console.log(`[KeyPool] Found ${jsonFiles.length} JSON key(s) in ./keys`);
+
+  return jsonFiles.map(filename => {
+    const keyPath = path.join(keysDir, filename);
+    // Parse JSON to extract project_id for Vertex AI
+    const keyContent = JSON.parse(fs.readFileSync(keyPath, 'utf-8'));
+    const projectId = keyContent.project_id || 'unknown';
+
+    // Temporarily set GOOGLE_APPLICATION_CREDENTIALS for client init
+    const prevCreds = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = keyPath;
+    const client = new GoogleGenAI({ vertexai: true, project: projectId, location: 'global' });
+    if (prevCreds !== undefined) {
+      process.env.GOOGLE_APPLICATION_CREDENTIALS = prevCreds;
+    } else {
+      delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    }
+
+    return {
+      client,
+      keyPath,
+      keyHint: filename.slice(-6),
+      cooldownUntil: 0,
+    };
+  });
 }
 
 const keyPool: KeySlot[] = buildKeyPool();
