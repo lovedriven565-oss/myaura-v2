@@ -13,7 +13,7 @@ const PREMIUM_MODEL_ID = "gemini-3-pro-image-preview"; // Vertex AI, global, Pub
 
 // Retry configuration for resilience against 429 rate limits
 const MAX_RETRIES = 3;
-const BASE_DELAY_MS = 15000; // 15s base — Vertex AI quota resets per-minute
+const BASE_DELAY_MS = 30000; // 30s base — aggressive backoff for Vertex AI quota
 const MAX_DELAY_MS = 90000; // cap at 90s
 
 /**

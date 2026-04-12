@@ -1,4 +1,13 @@
+import PQueue from "p-queue";
 import { PromptType, StyleId } from "./prompts.js";
+
+// Global governed queue: strictly sequential, min 6s between task starts.
+// Prevents Thundering Herd / Token Bucket Exhaustion on Vertex AI.
+const generationQueue = new PQueue({
+  concurrency: 1,
+  interval: parseInt(process.env.INTER_REQUEST_DELAY_MS || "6000"),
+  intervalCap: 1,
+});
 
 export type PackageId = "free" | "starter" | "pro" | "max";
 
@@ -113,13 +122,10 @@ export function buildStyleScheduleWithCount(config: PackageConfig, styleIds: Sty
   return schedule;
 }
 
-// Per-package generation config from environment
+// Per-package generation config — concurrency is now owned by generationQueue.
+// These values are kept for logging/compat only; the queue enforces actual limits.
 export function getGenerationConfig(packageId: PackageId): { concurrency: number; delayMs: number } {
-  const isFree = packageId === "free";
-  return {
-    concurrency: isFree ? 1 : parseInt(process.env.PREMIUM_CONCURRENCY || "3"),
-    delayMs: isFree ? 10_000 : parseInt(process.env.INTER_REQUEST_DELAY_MS || "1000"),
-  };
+  return { concurrency: 1, delayMs: parseInt(process.env.INTER_REQUEST_DELAY_MS || "6000") };
 }
 
 // Retry wrapper with exponential backoff for 429 rate limit errors
@@ -151,43 +157,37 @@ async function withRetry<R>(
   throw new Error("withRetry: unreachable");
 }
 
-// Batch execution with configurable concurrency, inter-batch delay, and per-item callback
+// Governed batch execution via p-queue.
+// Tasks run strictly one at a time with a minimum interval between starts.
+// No Promise.all — zero Thundering Herd risk.
 export async function runBatched<T, R>(
   items: T[],
   task: (item: T, index: number) => Promise<R>,
   options: {
-    concurrency: number;
-    delayMs: number;
+    concurrency: number;  // kept for API compat — queue controls actual concurrency
+    delayMs: number;      // kept for API compat — queue interval controls delay
     onItemComplete?: (index: number, result: PromiseSettledResult<R>) => void;
   }
 ): Promise<PromiseSettledResult<R>[]> {
-  const { concurrency, delayMs, onItemComplete } = options;
-  const results: PromiseSettledResult<R>[] = [];
+  const { onItemComplete } = options;
+  const results = new Array<PromiseSettledResult<R>>(items.length);
 
-  for (let i = 0; i < items.length; i += concurrency) {
-    // Inter-batch delay (not before the first batch)
-    if (i > 0) {
-      console.log(`Throttle: waiting ${delayMs / 1000}s before batch starting at ${i + 1}/${items.length}`);
-      await new Promise(r => setTimeout(r, delayMs));
-    }
-
-    const batch = items.slice(i, i + concurrency);
-    const batchPromises = batch.map(async (item, batchIdx) => {
-      const globalIdx = i + batchIdx;
+  // Enqueue all tasks at once — queue governs when each one starts
+  const taskPromises = items.map((item, i) =>
+    generationQueue.add(async () => {
+      console.log(`[Queue] Task ${i + 1}/${items.length} starting | queued: ${generationQueue.size} | running: ${generationQueue.pending}`);
       let result: PromiseSettledResult<R>;
       try {
-        const value = await withRetry(() => task(item, globalIdx));
+        const value = await withRetry(() => task(item, i));
         result = { status: "fulfilled", value };
       } catch (reason: any) {
         result = { status: "rejected", reason };
       }
-      if (onItemComplete) onItemComplete(globalIdx, result);
-      return result;
-    });
+      results[i] = result;
+      if (onItemComplete) onItemComplete(i, result);
+    })
+  );
 
-    const batchResults = await Promise.all(batchPromises);
-    results.push(...batchResults);
-  }
-
+  await Promise.all(taskPromises);
   return results;
 }
