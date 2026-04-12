@@ -117,14 +117,25 @@ export class VertexAIProvider implements IGenerationProvider {
       const geminiBase64 = await withExponentialBackoff(operation, "VertexAI.generateImage");
 
       // Stage 2: FaceSwap — paste user's real face onto Gemini-generated base
-      if (process.env.REPLICATE_API_TOKEN) {
+      const replicateToken = process.env.REPLICATE_API_TOKEN;
+      console.log("[TwoStep] REPLICATE_API_TOKEN present:", !!replicateToken, "| length:", replicateToken?.length ?? 0);
+
+      if (replicateToken) {
         try {
-          console.log("[TwoStep] Stage 2: FaceSwap via Replicate...");
-          return await swapFace(geminiBase64, originalImageBase64, mimeType);
+          console.log("[TwoStep] Stage 2: Starting FaceSwap via Replicate...");
+          const swapped = await swapFace(geminiBase64, originalImageBase64, mimeType);
+          console.log("[TwoStep] Stage 2: FaceSwap SUCCESS");
+          return swapped;
         } catch (swapErr: any) {
-          console.error("[TwoStep] FaceSwap failed, falling back to Gemini base:", swapErr.message);
+          console.error("╔══════════════════════════════════════════════════════╗");
+          console.error("║  [FACESWAP ERROR] Stage 2 FAILED — using Gemini base ║");
+          console.error("╚══════════════════════════════════════════════════════╝");
+          console.error("[FACESWAP ERROR] Message:", swapErr.message);
+          console.error("[FACESWAP ERROR] Stack:", swapErr.stack);
           return geminiBase64;
         }
+      } else {
+        console.warn("[TwoStep] REPLICATE_API_TOKEN is empty/unset — Stage 2 SKIPPED, returning Gemini base");
       }
 
       return geminiBase64;
