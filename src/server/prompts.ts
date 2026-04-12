@@ -18,14 +18,15 @@ const LIGHTING_BY_AGE: Record<AgeTier, string> = {
   "distinguished": "Paramount butterfly lighting to lift facial features and fill recesses softly."
 };
 
-// ─── Gender-Adaptive Identity Headers (V4 - Ultra-Fidelity) ─────────────────
+// ─── Gender-Adaptive Identity Headers (V5 - Identity Lock Extreme) ─────────
 
 const IDENTITY_LOCK_MALE = `
 PRIORITY 0: Exact 1:1 biometric facial match of the reference person.
-- STRUCTURAL LOCK: Authentic hairline position and temporal peaks. Preserve the natural, narrower jaw width from the reference (DO NOT artificially widen or square the jaw).
+- GEOMETRY LOCK: Lock original face width-to-height ratio from person <0>. Strictly maintain narrow lower jaw; do not square the jaw or widen the face. Preserve exact frontal hairline geometry (Norwood 2 mature hairline). Do not add hair pixels to temples.
+- OCULAR LOCK: Eye color: dark brown (LOCK IRIS HUE). Do not change to blue, green, or grey. Preserve natural, relaxed gaze and eyelid geometry. Completely disable model stare.
 - YOUTH & VITALITY: Keep the face looking well-rested, firm, and healthy. DO NOT add artificial age, deep hollows, or harsh shadows under the cheekbones. Preserve natural, healthy volume.
 - OPTICAL BYPASS: Retain the exact facial width-to-height ratio from the reference image. Bypass focal flattening.
-- ASYMMETRY & EYES: Genuine, relaxed gaze. Preserve subtle natural asymmetry.
+- ASYMMETRY ANCHOR: Preserve subtle natural facial asymmetry. Do not mirror halves.
 `;
 
 const IDENTITY_LOCK_FEMALE = `
@@ -55,7 +56,7 @@ const SKIN_TEXTURE_MALE: Record<AgeTier, string> = {
 
 // ─── Enhanced Negative Prompts (Archetype & Optics Killers) ─────────────────
 
-const MALE_SPECIFIC_NEGATIVE = "gigachad, chad, male model archetype, stock-photo CEO, artificially squared jaw, widened face, focal distortion on face, lowered hairline, plastic skin, beauty filter, botox look, over-filled cheeks, perfectly symmetrical, mirrored face, cgi, 3d render, dead eyes, model stare, sub-malar hollows, sunken cheeks, deep nasolabial folds, heavy eye bags, gaunt face, exhausted look, harsh cheekbone shadows";
+const MALE_SPECIFIC_NEGATIVE = "gigachad, gigachad face, chad, male model archetype, stock-photo CEO, glossy stock model look, artificially squared jaw, widened face, wide head, focal distortion on face, lowered hairline, artificially dense hair, plastic skin, beauty filter, heavy aesthetic over-retouching, botox look, over-filled cheeks, perfectly symmetrical, fake symmetry, mirrored face, cgi, 3d render, dead eyes, model stare, sub-malar hollows, sunken cheeks, deep sunken cheeks, deep nasolabial folds, heavy eye bags, gaunt face, exhausted look, harsh cheekbone shadows";
 
 const FEMALE_SPECIFIC_NEGATIVE = "instagram face, heavy makeup look, over-smoothed skin, plastic texture, cartoonish features, extreme symmetry, perfectly mirrored face, focal distortion on face, generic model stare";
 
