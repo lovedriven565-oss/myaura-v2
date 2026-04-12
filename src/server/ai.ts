@@ -192,7 +192,29 @@ export class VertexAIProvider implements IGenerationProvider {
 
       } catch (err: any) {
         const is429 = err?.status === 429 || err?.message?.includes("429") || err?.message?.includes("RESOURCE_EXHAUSTED");
-        if (is429) markKeyCooldown(slot);
+        if (is429) {
+          // Deep error logging for GCP quota/billing diagnosis
+          const deepDetails = {
+            status: err?.status,
+            message: err?.message,
+            code: err?.code,
+            name: err?.name,
+            response: err?.response ? {
+              status: err.response.status,
+              statusText: err.response.statusText,
+              data: err.response.data,
+              headers: err.response.headers,
+            } : null,
+            details: err?.details,
+            cause: err?.cause,
+            stack: err?.stack,
+          };
+          console.error("╔══════════════════════════════════════════════════════════════════╗");
+          console.error("║  [GCP Deep Error Details] 429 Resource Exhausted Analysis     ║");
+          console.error("╚══════════════════════════════════════════════════════════════════╝");
+          console.error("[GCP Deep Error Details]:", JSON.stringify(deepDetails, null, 2));
+          markKeyCooldown(slot);
+        }
         throw err;
       }
     };
