@@ -35,40 +35,26 @@ const VARIETY_FRAMINGS = [
 
 // ─── V6: Core JSON prompt builder ───────────────────────────────────────────
 function buildJsonPrompt(gender: Gender, styleId: StyleId, ageTier: AgeTier, mode: PromptType, index: number): string {
-  const irisSpec = gender === "male"
-    ? "dark brown — LOCKED, do not substitute blue, grey, or green"
-    : "exact iris color from reference photo — LOCKED";
-  const hairlineSpec = gender === "male"
-    ? "Preserve exact hairline geometry including temporal recession. Do not lower, thicken, or fill in."
-    : "Preserve exact hairline geometry from reference.";
-
   const scene = SCENE_COMPOSITIONS[styleId] || SCENE_COMPOSITIONS.business;
   const physics = PHOTOGRAPHY_PHYSICS[styleId] || PHOTOGRAPHY_PHYSICS.business;
   const framing = VARIETY_FRAMINGS[index % VARIETY_FRAMINGS.length];
 
+  const genderLabel = gender === "unset" ? "person" : gender;
+
   const payload = {
     system_directive: {
-      model_mode: "strict_execution",
-      world_knowledge: "SUPPRESSED",
-      aesthetic_bias: "DISABLED",
-      critical_instruction:
-        "ABSOLUTE PRIORITY: Reconstruct the subject face using ONLY pixel data from the uploaded reference photo. " +
-        "Do not substitute archetypes, correct symmetry, alter bone structure, or apply any beautification."
+      mode: "styled_portrait_base",
+      instruction:
+        "Generate a highly photorealistic styled portrait. " +
+        "The reference image provides clothing and pose context only. " +
+        "Generate a naturally attractive synthetic face of the specified gender and age — do not attempt identity matching."
     },
-    identity_lock: {
-      subject: `Person from reference image (${gender === "unset" ? "gender unspecified" : gender}, age tier: ${ageTier})`,
-      preservation_rules: [
-        "Replicate exact facial bone structure and soft tissue geometry from reference — zero reshaping",
-        `Iris hue: ${irisSpec}`,
-        "Preserve exact interpupillary distance and eyelid fold geometry",
-        hairlineSpec,
-        "Maintain authentic skin texture with visible pores — zero smoothing, zero retouch",
-        "Preserve natural facial asymmetry — do not mirror or average halves",
-        "Disable idealised gaze: subject has genuine relaxed look from reference",
-        mode === "premium"
-          ? "Full wardrobe replacement: discard reference clothing, dress in scene wardrobe below"
-          : "Minimal wardrobe adjustment only — preserve clothing character"
-      ]
+    subject: {
+      description: `Attractive ${genderLabel}, age tier: ${ageTier}. Natural look, photorealistic skin, clear engaging eyes, confident relaxed expression.`,
+      face_generation: "Synthesize a natural attractive face independently — perfect symmetry, clean skin, vivid eyes.",
+      clothing_and_pose: mode === "premium"
+        ? "Full wardrobe from scene specification below. Ignore reference clothing."
+        : "Preserve general clothing character from reference image."
     },
     scene: { wardrobe: scene.wardrobe, setting: scene.setting, mood: scene.mood, framing },
     photography: { lens: physics.lens, lighting: physics.lighting, color_grade: physics.color_grade }

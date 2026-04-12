@@ -1,5 +1,6 @@
 import { GoogleGenAI } from "@google/genai";
 import crypto from "crypto";
+import { swapFace } from "./faceswap.js";
 
 export interface IGenerationProvider {
   generateImage(originalImageBase64: string, mimeType: string, prompt: string, mode?: 'preview' | 'premium', additionalImages?: string[]): Promise<string>;
@@ -113,7 +114,20 @@ export class VertexAIProvider implements IGenerationProvider {
     };
 
     try {
-      return await withExponentialBackoff(operation, "VertexAI.generateImage");
+      const geminiBase64 = await withExponentialBackoff(operation, "VertexAI.generateImage");
+
+      // Stage 2: FaceSwap — paste user's real face onto Gemini-generated base
+      if (process.env.REPLICATE_API_TOKEN) {
+        try {
+          console.log("[TwoStep] Stage 2: FaceSwap via Replicate...");
+          return await swapFace(geminiBase64, originalImageBase64, mimeType);
+        } catch (swapErr: any) {
+          console.error("[TwoStep] FaceSwap failed, falling back to Gemini base:", swapErr.message);
+          return geminiBase64;
+        }
+      }
+
+      return geminiBase64;
     } catch (error: any) {
       console.error("Vertex AI Generation Error:", error);
       throw new Error(error.message || "Failed to generate image via Vertex AI");
