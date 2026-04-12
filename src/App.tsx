@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import Home from "./pages/Home";
 import UploadFree from "./pages/UploadFree";
@@ -13,7 +13,7 @@ import Result from "./pages/Result";
 import Privacy from "./pages/Privacy";
 import Terms from "./pages/Terms";
 
-function AuthWrapper({ children }: { children: React.ReactNode }) {
+function AuthWrapper({ children }: { children: ReactNode }) {
   const [isReady, setIsReady] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
 

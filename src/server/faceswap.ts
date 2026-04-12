@@ -24,7 +24,7 @@ export async function swapFace(
       target_image: `data:${mimeType};base64,${targetBase64}`,
       swap_image: `data:${mimeType};base64,${swapBase64}`,
     },
-  }) as string;
+  }) as unknown as string;
 
   if (!output || typeof output !== "string") {
     throw new Error("[FaceSwap] Replicate returned no output URL");

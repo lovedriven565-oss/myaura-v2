@@ -236,7 +236,7 @@ apiRouter.post("/generate",
       console.log("RAW REQ BODY:", req.body);
       
       // SAFETY CHECK: Handle both single file and multiple files
-      const imageFiles = req.files?.images as Express.Multer.File[];
+      const imageFiles = (req.files as { [fieldname: string]: Express.Multer.File[] })?.images;
       
       if (!imageFiles || imageFiles.length === 0) {
         return res.status(400).json({ 
@@ -517,7 +517,7 @@ apiRouter.post("/generate",
             results_failed: failedCount,
             result_path: successPaths[0] || null,
             result_paths: [...successPaths],
-          }).eq("id", id)
+          }).eq("id", id).then(() => {})
         ).catch(err => console.error("Progressive DB update error:", err));
       };
 

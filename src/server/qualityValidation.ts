@@ -266,7 +266,7 @@ Respond ONLY with valid JSON, no markdown:
       batchConsistencyScore: clamp(parsed.batchConsistencyScore ?? 50),
       styleFidelityScore: clamp(parsed.styleFidelityScore ?? 50),
       overall: 0,
-      failureTags: (parsed.failureTags || []).filter((t: string) => VALID_FAILURE_TAGS.has(t))
+      failureTags: (parsed.failureTags || []).filter((t: string) => VALID_FAILURE_TAGS.has(t as FailureTag)) as FailureTag[]
     };
 
     metrics.overall = Math.round(
