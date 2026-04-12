@@ -180,11 +180,19 @@ export async function runBatched<T, R>(
       try {
         const value = await withRetry(() => task(item, i));
         result = { status: "fulfilled", value };
+        console.log(`[Queue] Task ${i + 1}/${items.length} SUCCESS ✓`);
       } catch (reason: any) {
         result = { status: "rejected", reason };
+        console.error(`[Queue] Task ${i + 1}/${items.length} FAILED ✗ | error: ${reason?.message || String(reason)}`);
+        console.error(`[Queue] Task ${i + 1}/${items.length} stack:`, reason?.stack || "no stack");
       }
       results[i] = result;
-      if (onItemComplete) onItemComplete(i, result);
+      console.log(`[Queue] Task ${i + 1}/${items.length} DONE | status=${result.status} | queue size now: ${generationQueue.size}`);
+      try {
+        if (onItemComplete) onItemComplete(i, result);
+      } catch (cbErr: any) {
+        console.error(`[Queue] Task ${i + 1}/${items.length} onItemComplete THREW:`, cbErr?.message, cbErr?.stack);
+      }
     })
   );
 

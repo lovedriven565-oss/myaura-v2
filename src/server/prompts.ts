@@ -41,22 +41,29 @@ function buildJsonPrompt(gender: Gender, styleId: StyleId, ageTier: AgeTier, mod
 
   const genderLabel = gender === "unset" ? "person" : gender;
 
-  const payload = {
+  const payload: Record<string, any> = {
+    ...(gender !== "unset" && {
+      CRITICAL_GENDER_CONSTRAINT: `THIS PORTRAIT DEPICTS A ${gender.toUpperCase()}. ` +
+        `The subject is ${gender}. Body silhouette, clothing cut, hair style, and ALL visual features MUST match ${gender} anatomy and appearance. ` +
+        `This is non-negotiable. Do not generate a ${gender === "female" ? "male" : "female"} person.`
+    }),
     system_directive: {
       mode: "styled_portrait_base",
+      subject_gender: gender !== "unset" ? gender : "neutral",
       instruction:
         "Generate an ultra-high resolution, photorealistic styled portrait — indistinguishable from a professional photograph. " +
         "Apply natural film grain texture, subtle bokeh background blur, and realistic depth of field. " +
         "Render true-to-life skin pores, hair strands, and fabric microdetail at 8K quality. " +
         "The reference image provides clothing and pose context only. " +
-        "Generate a naturally attractive synthetic face of the specified gender and age — do not attempt identity matching."
+        `Generate a naturally attractive ${genderLabel} synthetic face of the specified age — do not attempt identity matching.`
     },
     subject: {
+      gender: gender !== "unset" ? `${gender.toUpperCase()} — MANDATORY` : "neutral person",
       description: `Attractive ${genderLabel}, age tier: ${ageTier}. Natural look, photorealistic skin, clear engaging eyes, confident relaxed expression.`,
-      face_generation: "Synthesize a natural attractive face independently — perfect symmetry, clean skin, vivid eyes.",
+      face_generation: `Synthesize a natural attractive ${genderLabel} face independently — perfect symmetry, clean skin, vivid eyes.`,
       clothing_and_pose: mode === "premium"
-        ? "Full wardrobe from scene specification below. Ignore reference clothing."
-        : "Preserve general clothing character from reference image."
+        ? `Full wardrobe from scene specification below, appropriate for ${genderLabel}. Ignore reference clothing.`
+        : `Preserve general clothing character from reference image, styled for ${genderLabel}.`
     },
     scene: { wardrobe: scene.wardrobe, setting: scene.setting, mood: scene.mood, framing },
     photography: { lens: physics.lens, lighting: physics.lighting, color_grade: physics.color_grade }

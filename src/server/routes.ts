@@ -506,8 +506,12 @@ apiRouter.post("/generate",
           }
         } else {
           failedCount++;
-          errors.push(result.reason?.message || "Unknown error");
-          console.warn(`[${id}] Image ${index + 1}/${schedule.length} failed: ${result.reason?.message}`);
+          const errMsg = result.reason?.message || String(result.reason) || "Unknown error";
+          errors.push(errMsg);
+          console.error(`╔═══ [${id}] IMAGE ${index + 1}/${schedule.length} FAILED ═══╗`);
+          console.error(`  Reason : ${errMsg}`);
+          console.error(`  Stack  : ${result.reason?.stack || "no stack available"}`);
+          console.error(`╚${"═".repeat(50)}╝`);
         }
 
         // Chain DB updates sequentially to avoid race conditions
