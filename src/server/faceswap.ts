@@ -35,6 +35,8 @@ export async function swapFace(
     input: {
       target_image: `data:${mimeType};base64,${targetBase64}`,
       swap_image: `data:${mimeType};base64,${swapBase64}`,
+      face_enhancer: "gfpgan",       // GFPGAN face restoration — sharper, more likeness
+      output_quality: 100,           // max JPEG quality (0-100)
     },
   });
 

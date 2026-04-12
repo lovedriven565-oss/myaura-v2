@@ -15,12 +15,12 @@ const SCENE_COMPOSITIONS: Record<StyleId, { wardrobe: string; setting: string; m
 
 // ─── V6: Photography Physics (technical only, no semantic labels) ─────────────
 const PHOTOGRAPHY_PHYSICS: Record<StyleId, { lens: string; lighting: string; color_grade: string }> = {
-  business:  { lens: "85mm portrait equivalent, shallow depth of field", lighting: "Dual soft-box frontal fill, even face illumination, zero hard shadows", color_grade: "Natural skin tones, slight warmth, clean neutral highlights" },
-  lifestyle: { lens: "50mm, moderate depth of field", lighting: "Warm backlight with soft reflector fill on face, golden-hour quality", color_grade: "Warm amber tones, natural saturation, gentle highlight roll-off" },
-  cinematic: { lens: "35mm, slight compression, crisp foreground", lighting: "45° directional key light, soft opposite fill, practical background bokeh", color_grade: "Teal-shifted shadows, orange midtones on skin, deep detailed blacks" },
-  editorial: { lens: "Medium format equivalent — compression and micro-detail latitude", lighting: "Overhead butterfly from beauty dish, defined cheekbone shadow line", color_grade: "High-fidelity skin reproduction, luminous whites, clean contrast" },
-  luxury:    { lens: "Portrait telephoto 90mm, very shallow depth", lighting: "Wrapped soft-box with warm practical ambient from interior lamps", color_grade: "Rich warm shadows with texture retention, classic film quality" },
-  aura:      { lens: "50mm, sharp center focus with heavy background bokeh", lighting: "Multi-source volumetric ambient with pastel-colored fill, face center-exposed", color_grade: "Iridescent highlight bloom on edges, face at accurate neutral exposure" }
+  business:  { lens: "85mm portrait equivalent, f/1.8 shallow depth of field, creamy background bokeh", lighting: "Dual soft-box frontal fill, even face illumination, zero hard shadows", color_grade: "Natural skin tones, slight warmth, clean neutral highlights, subtle film grain" },
+  lifestyle: { lens: "50mm, f/2.0 moderate depth of field, natural background separation", lighting: "Warm backlight with soft reflector fill on face, golden-hour quality", color_grade: "Warm amber tones, natural saturation, gentle highlight roll-off, organic film grain" },
+  cinematic: { lens: "35mm, f/1.4 crisp foreground with deep background bokeh", lighting: "45° directional key light, soft opposite fill, practical background bokeh", color_grade: "Teal-shifted shadows, orange midtones on skin, deep detailed blacks, cinematic film grain" },
+  editorial: { lens: "Medium format equivalent, f/2.8 — compression, micro-detail latitude, razor-sharp focus plane", lighting: "Overhead butterfly from beauty dish, defined cheekbone shadow line", color_grade: "High-fidelity skin reproduction, luminous whites, clean contrast, fine-grain texture" },
+  luxury:    { lens: "Portrait telephoto 90mm, f/1.6 very shallow depth, lush background bokeh", lighting: "Wrapped soft-box with warm practical ambient from interior lamps", color_grade: "Rich warm shadows with texture retention, classic analogue film grain" },
+  aura:      { lens: "50mm, f/1.2 sharp center focus, extreme background bokeh and light diffusion", lighting: "Multi-source volumetric ambient with pastel-colored fill, face center-exposed", color_grade: "Iridescent highlight bloom on edges, face at accurate neutral exposure, dreamlike film grain" }
 };
 
 // ─── V6: Variety framings for multi-image premium batches ────────────────────
@@ -45,7 +45,9 @@ function buildJsonPrompt(gender: Gender, styleId: StyleId, ageTier: AgeTier, mod
     system_directive: {
       mode: "styled_portrait_base",
       instruction:
-        "Generate a highly photorealistic styled portrait. " +
+        "Generate an ultra-high resolution, photorealistic styled portrait — indistinguishable from a professional photograph. " +
+        "Apply natural film grain texture, subtle bokeh background blur, and realistic depth of field. " +
+        "Render true-to-life skin pores, hair strands, and fabric microdetail at 8K quality. " +
         "The reference image provides clothing and pose context only. " +
         "Generate a naturally attractive synthetic face of the specified gender and age — do not attempt identity matching."
     },

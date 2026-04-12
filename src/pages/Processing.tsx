@@ -12,7 +12,7 @@ function getTgUserId(): string | null {
   return uid ? String(uid) : null;
 }
 
-const TIMEOUT_MS = 7 * 60 * 1000; // 7 minutes hard ceiling
+const TIMEOUT_MS = 25 * 60 * 1000; // 25 minutes hard ceiling (7 photos × ~3min each)
 
 const PROCESSING_MESSAGES = [
   "Анализируем черты лица...",
@@ -118,7 +118,7 @@ export default function Processing() {
       } catch (err) {
         console.error("Polling error", err);
       }
-    }, 2000);
+    }, 4000);
 
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [id, navigate]);
