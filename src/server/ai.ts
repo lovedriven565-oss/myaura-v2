@@ -192,18 +192,17 @@ export class VertexAIProvider implements IGenerationProvider {
 
       } catch (err: any) {
         const errMsg: string = err?.message || "";
-        const is429 = err?.status === 429 || errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED");
+        const errDetails = err?.details || [];
+
+        // Check for billing errors in multiple places: message string, details array, nested error object
         const isBilling = errMsg.includes("billing") || errMsg.includes("BILLING") ||
                           errMsg.includes("PROJECT_DISABLED") || errMsg.includes("billing not enabled") ||
-                          errMsg.includes("enable billing") || errMsg.includes("ACCOUNT_DISABLED");
+                          errMsg.includes("enable billing") || errMsg.includes("ACCOUNT_DISABLED") ||
+                          errDetails.some((d: any) => d?.reason === "BILLING_DISABLED") ||
+                          (err?.error?.message && err.error.message.includes("billing")) ||
+                          (err?.error?.details && err.error.details.some((d: any) => d?.reason === "BILLING_DISABLED"));
 
-        if (is429) {
-          console.error("╔══════════════════════════════════════════════════════════════════╗");
-          console.error(`║  [GCP 429] RESOURCE_EXHAUSTED on key: ${slot.keyHint}            ║`);
-          console.error("╚══════════════════════════════════════════════════════════════════╝");
-          console.error("[GCP Deep Error]:", JSON.stringify({ status: err?.status, message: errMsg, details: err?.details }, null, 2));
-          markKeyCooldown(slot);
-        }
+        const is429 = err?.status === 429 || errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED");
 
         if (isBilling) {
           // Billing error = permanent failure for this key in this process lifetime.
@@ -213,7 +212,16 @@ export class VertexAIProvider implements IGenerationProvider {
           console.error(`║  This key will be SKIPPED for the next 24 hours.               ║`);
           console.error("╚══════════════════════════════════════════════════════════════════╝");
           console.error("[GCP Billing Error message]:", errMsg.slice(0, 300));
+          console.error("[GCP Billing Error details]:", JSON.stringify(errDetails, null, 2));
           slot.cooldownUntil = Date.now() + 24 * 60 * 60 * 1000; // 24h — effectively permanent
+        }
+
+        if (is429) {
+          console.error("╔══════════════════════════════════════════════════════════════════╗");
+          console.error(`║  [GCP 429] RESOURCE_EXHAUSTED on key: ${slot.keyHint}            ║`);
+          console.error("╚══════════════════════════════════════════════════════════════════╝");
+          console.error("[GCP Deep Error]:", JSON.stringify({ status: err?.status, message: errMsg, details: err?.details }, null, 2));
+          markKeyCooldown(slot);
         }
 
         throw err;
