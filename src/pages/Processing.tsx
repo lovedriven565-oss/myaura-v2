@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { Sparkles, Check, AlertTriangle } from "lucide-react";
+import { Sparkles, Check, AlertTriangle, Clock } from "lucide-react";
 
 function getActiveGenKey(): string {
   const uid = (window as any).Telegram?.WebApp?.initDataUnsafe?.user?.id;
@@ -11,6 +11,8 @@ function getTgUserId(): string | null {
   const uid = (window as any).Telegram?.WebApp?.initDataUnsafe?.user?.id;
   return uid ? String(uid) : null;
 }
+
+const TIMEOUT_MS = 7 * 60 * 1000; // 7 minutes hard ceiling
 
 const PROCESSING_MESSAGES = [
   "Анализируем черты лица...",
@@ -36,6 +38,9 @@ export default function Processing() {
   const [status, setStatus] = useState<string>("processing");
   const [etaText, setEtaText] = useState<string | null>(null);
   const [msgIndex, setMsgIndex] = useState(0);
+  const [timedOut, setTimedOut] = useState(false);
+  const [timeoutCountdown, setTimeoutCountdown] = useState(5);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Cycle status messages every 3.5s
   useEffect(() => {
@@ -43,17 +48,49 @@ export default function Processing() {
     return () => clearInterval(t);
   }, []);
 
+  // Hard timeout: 7 minutes from mount
+  useEffect(() => {
+    const t = setTimeout(() => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      localStorage.removeItem(getActiveGenKey());
+      setTimedOut(true);
+      // Countdown then auto-redirect
+      let count = 5;
+      const cd = setInterval(() => {
+        count -= 1;
+        setTimeoutCountdown(count);
+        if (count <= 0) {
+          clearInterval(cd);
+          navigate("/", { replace: true });
+        }
+      }, 1000);
+    }, TIMEOUT_MS);
+    return () => clearTimeout(t);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleCancel = () => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    localStorage.removeItem(getActiveGenKey());
+    // Fire-and-forget: mark generation as cancelled on backend
+    const tg = (window as any).Telegram?.WebApp;
+    fetch(`/api/cancel/${id}`, {
+      method: "POST",
+      headers: { "X-Init-Data": tg?.initData || "" },
+    }).catch(() => {});
+    navigate("/", { replace: true });
+  };
+
   useEffect(() => {
     const tgUserId = getTgUserId();
     const statusUrl = tgUserId ? `/api/status/${id}?tgUserId=${tgUserId}` : `/api/status/${id}`;
 
-    const poll = setInterval(async () => {
+    pollRef.current = setInterval(async () => {
       try {
         const res = await fetch(statusUrl);
 
         // 403 = stale/foreign session in localStorage → silently clean up and go home
         if (res.status === 403) {
-          clearInterval(poll);
+          if (pollRef.current) clearInterval(pollRef.current);
           localStorage.removeItem(getActiveGenKey());
           navigate("/", { replace: true });
           return;
@@ -69,11 +106,11 @@ export default function Processing() {
         const allDone = prog.total > 0 && (prog.completed + prog.failed) >= prog.total;
 
         if (data.status === "completed" || data.status === "partial" || (allDone && prog.completed > 0)) {
-          clearInterval(poll);
+          if (pollRef.current) clearInterval(pollRef.current);
           localStorage.removeItem(getActiveGenKey());
           setTimeout(() => navigate(`/result/${id}`), 800);
-        } else if (data.status === "failed" || (allDone && prog.completed === 0)) {
-          clearInterval(poll);
+        } else if (data.status === "failed" || data.status === "cancelled" || (allDone && prog.completed === 0)) {
+          if (pollRef.current) clearInterval(pollRef.current);
           localStorage.removeItem(getActiveGenKey());
           alert("Ошибка генерации: " + (data.error || "Неизвестная ошибка"));
           navigate("/");
@@ -83,7 +120,7 @@ export default function Processing() {
       }
     }, 2000);
 
-    return () => clearInterval(poll);
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [id, navigate]);
 
   const pct = progress.total > 0
@@ -94,6 +131,25 @@ export default function Processing() {
 
   return (
     <div className="bg-[#0a0a0a] text-white font-sans min-h-screen flex flex-col items-center justify-center p-6 overflow-hidden relative selection:bg-purple-500/30">
+
+      {/* Timeout overlay */}
+      {timedOut && (
+        <div className="fixed inset-0 z-[100] bg-[#0a0a0a]/98 flex flex-col items-center justify-center p-8 text-center">
+          <div className="w-16 h-16 rounded-full bg-orange-500/10 border border-orange-500/20 flex items-center justify-center mb-6">
+            <Clock className="text-orange-400 w-7 h-7" />
+          </div>
+          <h2 className="text-xl font-light text-white mb-3">Превышено время ожидания</h2>
+          <p className="text-white/50 text-[14px] font-light leading-relaxed max-w-[280px] mb-8">
+            Сервер занял слишком много времени. Результат придёт в Telegram, если генерация завершилась.
+          </p>
+          <button
+            onClick={() => navigate("/", { replace: true })}
+            className="px-8 py-3 rounded-2xl bg-white/[0.06] border border-white/10 text-white/80 text-[14px] font-medium hover:bg-white/[0.10] transition-all"
+          >
+            На главную &mdash; {timeoutCountdown}
+          </button>
+        </div>
+      )}
 
       {/* Top linear progress bar */}
       <div className="fixed top-0 left-0 right-0 h-[3px] bg-white/5 z-50">
@@ -228,10 +284,16 @@ export default function Processing() {
         </div>
       </main>
 
-      <footer className="fixed bottom-10 w-full text-center px-12">
+      <footer className="fixed bottom-6 w-full flex flex-col items-center gap-3 px-12">
         <p className="text-[12px] text-white/30 font-light tracking-wide">
           Можете закрыть приложение — результат придёт в Telegram
         </p>
+        <button
+          onClick={handleCancel}
+          className="text-[12px] text-white/20 hover:text-white/50 transition-colors duration-200 underline decoration-white/10 underline-offset-4"
+        >
+          Отменить и вернуться
+        </button>
       </footer>
     </div>
   );

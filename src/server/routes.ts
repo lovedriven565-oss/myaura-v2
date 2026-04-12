@@ -678,6 +678,23 @@ apiRouter.get("/status/:id", async (req, res, next) => {
   }
 });
 
+// 3. Cancel Generation
+apiRouter.post("/cancel/:id", async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const db = getDb();
+    const { error } = await db
+      .from("generations")
+      .update({ status: "cancelled" })
+      .eq("id", id)
+      .in("status", ["processing", "pending"]); // only cancel if still running
+    if (error) console.warn(`[cancel] DB update error for ${id}:`, error.message);
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // ─── Monetization: Packages, Balance, Catalog, Invoice ─────────────────────
 
 const STORE_PACKAGES = [
