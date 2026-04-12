@@ -12,8 +12,8 @@ const PREMIUM_MODEL_ID = "gemini-3-pro-image-preview"; // Vertex AI, global, Pub
 
 // Retry configuration for resilience against 429 rate limits
 const MAX_RETRIES = 3;
-const BASE_DELAY_MS = 1000;
-const MAX_DELAY_MS = 30000;
+const BASE_DELAY_MS = 15000; // 15s base — Vertex AI quota resets per-minute
+const MAX_DELAY_MS = 90000; // cap at 90s
 
 /**
  * Exponential backoff with jitter for resilient API calls
@@ -97,6 +97,9 @@ export class VertexAIProvider implements IGenerationProvider {
           // @ts-ignore — SDK types lag behind REST API; these params ARE supported
           responseModalities: ["TEXT", "IMAGE"],
           safetySettings: SAFETY_SETTINGS,
+          // Low temperature = maximum fidelity to reference image (minimal creative deviation)
+          temperature: mode === 'premium' ? 0.1 : 0.4,
+          topP: mode === 'premium' ? 0.8 : 0.95,
         },
       } as any);
 
@@ -156,6 +159,8 @@ export class GeminiProvider implements IGenerationProvider {
           // @ts-ignore — SDK types lag behind REST API; these params ARE supported
           responseModalities: ["TEXT", "IMAGE"],
           safetySettings: SAFETY_SETTINGS,
+          temperature: mode === 'premium' ? 0.1 : 0.4,
+          topP: mode === 'premium' ? 0.8 : 0.95,
         },
       } as any);
 
