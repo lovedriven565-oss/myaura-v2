@@ -198,9 +198,12 @@ export class VertexAIProvider implements IGenerationProvider {
         const isBilling = errMsg.includes("billing") || errMsg.includes("BILLING") ||
                           errMsg.includes("PROJECT_DISABLED") || errMsg.includes("billing not enabled") ||
                           errMsg.includes("enable billing") || errMsg.includes("ACCOUNT_DISABLED") ||
-                          errDetails.some((d: any) => d?.reason === "BILLING_DISABLED") ||
-                          (err?.error?.message && err.error.message.includes("billing")) ||
-                          (err?.error?.details && err.error.details.some((d: any) => d?.reason === "BILLING_DISABLED"));
+                          errMsg.includes("IAM_PERMISSION_DENIED") || errMsg.includes("PERMISSION_DENIED") ||
+                          err?.status === "PERMISSION_DENIED" ||
+                          err?.error?.status === "PERMISSION_DENIED" ||
+                          errDetails.some((d: any) => d?.reason === "BILLING_DISABLED" || d?.reason === "IAM_PERMISSION_DENIED") ||
+                          (err?.error?.message && (err.error.message.includes("billing") || err.error.message.includes("permission"))) ||
+                          (err?.error?.details && err.error.details.some((d: any) => d?.reason === "BILLING_DISABLED" || d?.reason === "IAM_PERMISSION_DENIED"));
 
         const is429 = err?.status === 429 || errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED");
 
@@ -208,7 +211,7 @@ export class VertexAIProvider implements IGenerationProvider {
           // Billing error = permanent failure for this key in this process lifetime.
           // Set cooldown to 24 hours so the key is never retried.
           console.error("╔══════════════════════════════════════════════════════════════════╗");
-          console.error(`║  [GCP BILLING ERROR] Key ${slot.keyHint} has no billing enabled! ║`);
+          console.error(`║  [GCP BILLING ERROR] Key ${slot.keyHint} has no billing enabled or permission denied! ║`);
           console.error(`║  This key will be SKIPPED for the next 24 hours.               ║`);
           console.error("╚══════════════════════════════════════════════════════════════════╝");
           console.error("[GCP Billing Error message]:", errMsg.slice(0, 300));
