@@ -191,30 +191,31 @@ export class VertexAIProvider implements IGenerationProvider {
         throw new Error(`No image data returned from Vertex AI model (${modelId})`);
 
       } catch (err: any) {
-        const is429 = err?.status === 429 || err?.message?.includes("429") || err?.message?.includes("RESOURCE_EXHAUSTED");
+        const errMsg: string = err?.message || "";
+        const is429 = err?.status === 429 || errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED");
+        const isBilling = errMsg.includes("billing") || errMsg.includes("BILLING") ||
+                          errMsg.includes("PROJECT_DISABLED") || errMsg.includes("billing not enabled") ||
+                          errMsg.includes("enable billing") || errMsg.includes("ACCOUNT_DISABLED");
+
         if (is429) {
-          // Deep error logging for GCP quota/billing diagnosis
-          const deepDetails = {
-            status: err?.status,
-            message: err?.message,
-            code: err?.code,
-            name: err?.name,
-            response: err?.response ? {
-              status: err.response.status,
-              statusText: err.response.statusText,
-              data: err.response.data,
-              headers: err.response.headers,
-            } : null,
-            details: err?.details,
-            cause: err?.cause,
-            stack: err?.stack,
-          };
           console.error("╔══════════════════════════════════════════════════════════════════╗");
-          console.error("║  [GCP Deep Error Details] 429 Resource Exhausted Analysis     ║");
+          console.error(`║  [GCP 429] RESOURCE_EXHAUSTED on key: ${slot.keyHint}            ║`);
           console.error("╚══════════════════════════════════════════════════════════════════╝");
-          console.error("[GCP Deep Error Details]:", JSON.stringify(deepDetails, null, 2));
+          console.error("[GCP Deep Error]:", JSON.stringify({ status: err?.status, message: errMsg, details: err?.details }, null, 2));
           markKeyCooldown(slot);
         }
+
+        if (isBilling) {
+          // Billing error = permanent failure for this key in this process lifetime.
+          // Set cooldown to 24 hours so the key is never retried.
+          console.error("╔══════════════════════════════════════════════════════════════════╗");
+          console.error(`║  [GCP BILLING ERROR] Key ${slot.keyHint} has no billing enabled! ║`);
+          console.error(`║  This key will be SKIPPED for the next 24 hours.               ║`);
+          console.error("╚══════════════════════════════════════════════════════════════════╝");
+          console.error("[GCP Billing Error message]:", errMsg.slice(0, 300));
+          slot.cooldownUntil = Date.now() + 24 * 60 * 60 * 1000; // 24h — effectively permanent
+        }
+
         throw err;
       }
     };
