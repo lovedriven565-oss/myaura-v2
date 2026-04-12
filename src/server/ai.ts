@@ -50,6 +50,64 @@ async function withExponentialBackoff<T>(
   throw new Error(`withExponentialBackoff: unreachable`);
 }
 
+// ─── Round-Robin Key Pool ───────────────────────────────────────────────────
+// Supports VERTEX_API_KEYS=key1,key2,key3 (comma-separated).
+// Falls back to single ADC client if no keys defined.
+
+interface KeySlot {
+  client: GoogleGenAI;
+  keyHint: string;       // last 6 chars for logging
+  cooldownUntil: number; // epoch ms — 0 means ready
+}
+
+const KEY_COOLDOWN_MS = 60_000; // cooldown 60s after a 429
+
+function buildKeyPool(): KeySlot[] {
+  const raw = process.env.VERTEX_API_KEYS || "";
+  const keys = raw.split(",").map(k => k.trim()).filter(Boolean);
+
+  if (keys.length > 0) {
+    console.log(`[KeyPool] Loaded ${keys.length} key(s) for round-robin rotation`);
+    return keys.map(key => ({
+      client: new GoogleGenAI({ apiKey: key }),
+      keyHint: key.slice(-6),
+      cooldownUntil: 0,
+    }));
+  }
+
+  // Fallback: single ADC client (existing Vertex AI behavior via env vars)
+  console.log("[KeyPool] No VERTEX_API_KEYS — using single ADC client");
+  return [{ client: new GoogleGenAI({}), keyHint: "adc", cooldownUntil: 0 }];
+}
+
+const keyPool: KeySlot[] = buildKeyPool();
+let keyIndex = 0;
+
+function getNextClient(): KeySlot {
+  const now = Date.now();
+  const total = keyPool.length;
+
+  for (let i = 0; i < total; i++) {
+    const slot = keyPool[(keyIndex + i) % total];
+    if (slot.cooldownUntil <= now) {
+      keyIndex = ((keyIndex + i) + 1) % total;
+      return slot;
+    }
+  }
+
+  // All keys in cooldown — return the one expiring soonest
+  const earliest = keyPool.reduce((a, b) => a.cooldownUntil < b.cooldownUntil ? a : b);
+  const waitSec = Math.ceil((earliest.cooldownUntil - now) / 1000);
+  console.warn(`[KeyPool] All ${total} key(s) cooling. Soonest ready in ${waitSec}s (key ...${earliest.keyHint})`);
+  return earliest;
+}
+
+function markKeyCooldown(slot: KeySlot): void {
+  slot.cooldownUntil = Date.now() + KEY_COOLDOWN_MS;
+  const ready = keyPool.filter(k => k.cooldownUntil <= Date.now()).length;
+  console.warn(`[KeyPool] Key ...${slot.keyHint} → cooldown 60s | ${ready}/${keyPool.length} key(s) still ready`);
+}
+
 // Safety settings: minimize blocking for real face generation
 const SAFETY_SETTINGS = [
   { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
@@ -60,57 +118,54 @@ const SAFETY_SETTINGS = [
 
 // Target Architecture: Vertex AI (GCP) — location: global
 // Requires: GOOGLE_GENAI_USE_VERTEXAI="true", GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_LOCATION="global"
+// Key rotation: set VERTEX_API_KEYS=key1,key2,... for multi-project round-robin
 export class VertexAIProvider implements IGenerationProvider {
-  private ai: GoogleGenAI;
-
-  constructor() {
-    // SDK reads GOOGLE_CLOUD_LOCATION from env; must be set to "global" for both image models
-    this.ai = new GoogleGenAI({});
-  }
 
   async generateImage(originalImageBase64: string, mimeType: string, prompt: string, mode: 'preview' | 'premium' = 'premium', additionalImages?: string[]): Promise<string> {
+    // Each invocation picks the next available (non-cooling) key
     const operation = async () => {
+      const slot = getNextClient();
+      const ready = keyPool.filter(k => k.cooldownUntil <= Date.now()).length;
+      console.log(`[KeyPool] Using key ...${slot.keyHint} | ${ready}/${keyPool.length} ready`);
+
       // Build contents array: images first, prompt last
       const contents: any[] = [];
 
-      // Add primary image
-      contents.push({
-        inlineData: { data: originalImageBase64, mimeType },
-      });
+      contents.push({ inlineData: { data: originalImageBase64, mimeType } });
 
-      // For premium mode, add all additional reference images for character consistency
       if (mode === 'premium' && additionalImages && additionalImages.length > 0) {
         for (const imgBase64 of additionalImages) {
-          contents.push({
-            inlineData: { data: imgBase64, mimeType },
-          });
+          contents.push({ inlineData: { data: imgBase64, mimeType } });
         }
       }
 
-      // Prompt goes last
       contents.push({ text: prompt });
 
       const modelId = mode === 'premium' ? PREMIUM_MODEL_ID : FREE_MODEL_ID;
-      const response = await this.ai.models.generateContent({
-        model: modelId,
-        contents,
-        config: {
-          // @ts-ignore — SDK types lag behind REST API; these params ARE supported
-          responseModalities: ["TEXT", "IMAGE"],
-          safetySettings: SAFETY_SETTINGS,
-          // Low temperature = maximum fidelity to reference image (minimal creative deviation)
-          temperature: mode === 'premium' ? 0.1 : 0.4,
-          topP: mode === 'premium' ? 0.8 : 0.95,
-        },
-      } as any);
 
-      for (const part of response.candidates?.[0]?.content?.parts || []) {
-        if (part.inlineData) {
-          return part.inlineData.data;
+      try {
+        const response = await slot.client.models.generateContent({
+          model: modelId,
+          contents,
+          config: {
+            // @ts-ignore — SDK types lag behind REST API; these params ARE supported
+            responseModalities: ["TEXT", "IMAGE"],
+            safetySettings: SAFETY_SETTINGS,
+            temperature: mode === 'premium' ? 0.1 : 0.4,
+            topP: mode === 'premium' ? 0.8 : 0.95,
+          },
+        } as any);
+
+        for (const part of response.candidates?.[0]?.content?.parts || []) {
+          if (part.inlineData) return part.inlineData.data;
         }
-      }
+        throw new Error(`No image data returned from Vertex AI model (${modelId})`);
 
-      throw new Error(`No image data returned from Vertex AI model (${modelId})`);
+      } catch (err: any) {
+        const is429 = err?.status === 429 || err?.message?.includes("429") || err?.message?.includes("RESOURCE_EXHAUSTED");
+        if (is429) markKeyCooldown(slot);
+        throw err;
+      }
     };
 
     try {
