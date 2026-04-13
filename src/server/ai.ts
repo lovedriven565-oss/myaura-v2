@@ -194,6 +194,14 @@ export class VertexAIProvider implements IGenerationProvider {
         const errMsg: string = err?.message || "";
         const errDetails = err?.details || [];
 
+        // Parse err.message as JSON if it's a stringified error object
+        let parsedError: any = null;
+        try {
+          parsedError = JSON.parse(errMsg);
+        } catch {
+          // Not JSON, use as-is
+        }
+
         // Check for billing errors in multiple places: message string, details array, nested error object
         const isBilling = errMsg.includes("billing") || errMsg.includes("BILLING") ||
                           errMsg.includes("PROJECT_DISABLED") || errMsg.includes("billing not enabled") ||
@@ -201,6 +209,8 @@ export class VertexAIProvider implements IGenerationProvider {
                           errMsg.includes("IAM_PERMISSION_DENIED") || errMsg.includes("PERMISSION_DENIED") ||
                           err?.status === "PERMISSION_DENIED" ||
                           err?.error?.status === "PERMISSION_DENIED" ||
+                          (parsedError?.error?.status === "PERMISSION_DENIED") ||
+                          (parsedError?.error?.details && parsedError.error.details.some((d: any) => d?.reason === "IAM_PERMISSION_DENIED")) ||
                           errDetails.some((d: any) => d?.reason === "BILLING_DISABLED" || d?.reason === "IAM_PERMISSION_DENIED") ||
                           (err?.error?.message && (err.error.message.includes("billing") || err.error.message.includes("permission"))) ||
                           (err?.error?.details && err.error.details.some((d: any) => d?.reason === "BILLING_DISABLED" || d?.reason === "IAM_PERMISSION_DENIED"));
