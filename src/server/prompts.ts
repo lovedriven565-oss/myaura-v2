@@ -33,43 +33,41 @@ const VARIETY_FRAMINGS = [
   "Slight 3/4 turn right, relaxed natural posture"
 ];
 
-// ─── V6: Core JSON prompt builder ───────────────────────────────────────────
-function buildJsonPrompt(gender: Gender, styleId: StyleId, ageTier: AgeTier, mode: PromptType, index: number): string {
+// ─── V6: Core Natural Language prompt builder ─────────────────────────────
+function buildNaturalLanguagePrompt(gender: Gender, styleId: StyleId, ageTier: AgeTier, mode: PromptType, index: number): string {
   const scene = SCENE_COMPOSITIONS[styleId] || SCENE_COMPOSITIONS.business;
   const physics = PHOTOGRAPHY_PHYSICS[styleId] || PHOTOGRAPHY_PHYSICS.business;
   const framing = VARIETY_FRAMINGS[index % VARIETY_FRAMINGS.length];
-
   const genderLabel = gender === "unset" ? "person" : gender;
 
-  const payload: Record<string, any> = {
-    ...(gender !== "unset" && {
-      CRITICAL_GENDER_CONSTRAINT: `THIS PORTRAIT DEPICTS A ${gender.toUpperCase()}. ` +
-        `The subject is ${gender}. Body silhouette, clothing cut, hair style, and ALL visual features MUST match ${gender} anatomy and appearance. ` +
-        `This is non-negotiable. Do not generate a ${gender === "female" ? "male" : "female"} person.`
-    }),
-    system_directive: {
-      mode: "styled_portrait_base",
-      subject_gender: gender !== "unset" ? gender : "neutral",
-      instruction:
-        "Generate an ultra-high resolution, photorealistic styled portrait — indistinguishable from a professional photograph. " +
-        "Apply natural film grain texture, subtle bokeh background blur, and realistic depth of field. " +
-        "Render true-to-life skin pores, hair strands, and fabric microdetail at 8K quality. " +
-        "The reference image provides clothing and pose context only. " +
-        `Generate a naturally attractive ${genderLabel} synthetic face of the specified age — do not attempt identity matching.`
-    },
-    subject: {
-      gender: gender !== "unset" ? `${gender.toUpperCase()} — MANDATORY` : "neutral person",
-      description: `Attractive ${genderLabel}, age tier: ${ageTier}. Natural look, photorealistic skin, clear engaging eyes, confident relaxed expression.`,
-      face_generation: `Synthesize a natural attractive ${genderLabel} face independently — perfect symmetry, clean skin, vivid eyes.`,
-      clothing_and_pose: mode === "premium"
-        ? `Full wardrobe from scene specification below, appropriate for ${genderLabel}. Ignore reference clothing.`
-        : `Preserve general clothing character from reference image, styled for ${genderLabel}.`
-    },
-    scene: { wardrobe: scene.wardrobe, setting: scene.setting, mood: scene.mood, framing },
-    photography: { lens: physics.lens, lighting: physics.lighting, color_grade: physics.color_grade }
-  };
+  let prompt = "";
 
-  return JSON.stringify(payload, null, 2);
+  // 1. CRITICAL CONSTRAINT (Weight: Maximum)
+  if (gender !== "unset") {
+    prompt += `[CRITICAL REQUIREMENT: THIS PORTRAIT DEPICTS A ${gender.toUpperCase()}. All anatomical and visual features MUST strictly match a ${gender}. Do not generate a ${gender === "female" ? "male" : "female"}.] `;
+  }
+
+  // 2. BASE DIRECTIVE
+  prompt += "Generate an ultra-high resolution, photorealistic styled portrait, indistinguishable from a professional photograph. ";
+
+  // 3. SUBJECT
+  prompt += `Subject: Attractive ${genderLabel}, age tier: ${ageTier}. Natural look, highly detailed photorealistic skin, clear engaging eyes, confident relaxed expression. `;
+  if (mode === "premium") {
+    prompt += `Ignore reference clothing. `;
+  } else {
+    prompt += `Preserve general clothing character from reference image, styled for ${genderLabel}. `;
+  }
+
+  // 4. SCENE & WARDROBE
+  prompt += `Wardrobe: ${scene.wardrobe}. Setting: ${scene.setting}. Mood: ${scene.mood}. `;
+
+  // 5. PHOTOGRAPHY PHYSICS
+  prompt += `Camera and Lighting: ${physics.lens}. ${physics.lighting}. ${physics.color_grade}. `;
+  
+  // 6. FRAMING
+  prompt += `Framing: ${framing}.`;
+
+  return prompt;
 }
 
 export function buildPromptProfile(
@@ -79,19 +77,19 @@ export function buildPromptProfile(
   ageTier: AgeTier = "young",
   gender: Gender = "unset"
 ): { positivePrompt: string; negativePrompt: string; debugPromptParts: any } {
-  const positivePrompt = buildJsonPrompt(gender, styleId, ageTier, mode, index);
+  const positivePrompt = buildNaturalLanguagePrompt(gender, styleId, ageTier, mode, index);
   // Minimal negative prompt — long lists pollute the attention softmax and dilute identity lock
   const negativePrompt = "mutated, deformed, facial reconstruction, different person";
 
   const debugPromptParts = {
-    version: "V6-JSON",
+    version: "V6-NL",
     styleId, mode, gender, ageTier, index,
     framing: VARIETY_FRAMINGS[index % VARIETY_FRAMINGS.length],
     scene: SCENE_COMPOSITIONS[styleId],
     physics: PHOTOGRAPHY_PHYSICS[styleId]
   };
 
-  console.log(`[PROMPT V6-JSON] style=${styleId} mode=${mode} gender=${gender} ageTier=${ageTier} idx=${index}`);
+  console.log(`[PROMPT V6-NL] style=${styleId} mode=${mode} gender=${gender} ageTier=${ageTier} idx=${index}`);
   return { positivePrompt, negativePrompt, debugPromptParts };
 }
 
