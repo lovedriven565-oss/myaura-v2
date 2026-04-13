@@ -186,7 +186,13 @@ export class VertexAIProvider implements IGenerationProvider {
         } as any);
 
         for (const part of response.candidates?.[0]?.content?.parts || []) {
-          if (part.inlineData) return part.inlineData.data;
+          if (part.inlineData) {
+            const geminiBase64 = part.inlineData.data;
+            console.log(`[STAGE 1 VISUAL AUDIT - GEMINI OUTPUT]`);
+            console.log(`  Gemini base64 (first 50 chars): ${geminiBase64.slice(0, 50)}...`);
+            console.log(`  (To view Stage 1 result: paste into data:image/jpeg;base64,... in browser)`);
+            return geminiBase64;
+          }
         }
         throw new Error(`No image data returned from Vertex AI model (${modelId})`);
 

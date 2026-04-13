@@ -22,23 +22,31 @@ export async function swapFace(
   const replicate = new Replicate({ auth: token });
   console.log("[FACESWAP TRACE 2] Replicate client created");
 
-  // TRACE 3: Input sizes
+  // TRACE 3: Input sizes + visual audit (first 50 chars of base64)
   console.log(
     `[FACESWAP TRACE 3] Inputs — target: ${Math.round(targetBase64.length / 1024)}KB, swap: ${Math.round(swapBase64.length / 1024)}KB, mime: ${mimeType}`
   );
+  console.log(`[FACESWAP VISUAL AUDIT - INPUTS]`);
+  console.log(`  Target (Gemini): data:${mimeType};base64,${targetBase64.slice(0, 50)}...`);
+  console.log(`  Swap (User face): data:${mimeType};base64,${swapBase64.slice(0, 50)}...`);
 
   // TRACE 4: Calling model
   console.log("[FACESWAP TRACE 4] Calling replicate.run()...");
   const t0 = Date.now();
 
-  const output = await replicate.run(FACESWAP_MODEL, {
-    input: {
+  const inputParams = {
       target_image: `data:${mimeType};base64,${targetBase64}`,
       swap_image: `data:${mimeType};base64,${swapBase64}`,
       face_enhancer: "gfpgan",       // GFPGAN face restoration — sharper, more likeness
       output_quality: 100,           // max JPEG quality (0-100)
-    },
-  });
+    };
+
+  console.log(`[FACESWAP VISUAL AUDIT - PARAMETERS]`);
+  console.log(`  face_enhancer: ${inputParams.face_enhancer}`);
+  console.log(`  output_quality: ${inputParams.output_quality}`);
+  console.log(`  (Note: lucataco/faceswap does not support weight/similarity parameters in current version)`);
+
+  const output = await replicate.run(FACESWAP_MODEL, { input: inputParams });
 
   const elapsed = Date.now() - t0;
   console.log(`[FACESWAP TRACE 5] replicate.run() returned in ${elapsed}ms | type: ${typeof output} | value: ${String(output).slice(0, 120)}`);
@@ -47,6 +55,10 @@ export async function swapFace(
   // FileOutput implements toString() which returns the URL.
   // We use String() to handle both FileOutput and legacy plain string.
   const outputUrl = String(output);
+
+  console.log(`[FACESWAP VISUAL AUDIT - OUTPUT]`);
+  console.log(`  Replicate result URL: ${outputUrl}`);
+  console.log(`  (Open this URL in browser to see Stage 2 result - AFTER FaceSwap)`);
 
   if (!outputUrl || outputUrl === "undefined" || outputUrl === "null") {
     throw new Error(`[FaceSwap] Replicate returned empty output. Raw: ${JSON.stringify(output)}`);
