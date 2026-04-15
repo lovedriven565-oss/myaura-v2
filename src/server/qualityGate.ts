@@ -42,15 +42,16 @@ async function multimodalJudge(
   style: string
 ): Promise<QualityScore | null> {
   try {
-    // Quality judge always uses Gemini API directly (not Vertex AI).
-    // Vertex AI requires regional endpoints + specific versioned model names
-    // (e.g. gemini-1.5-flash-001 in us-central1), which differ from Gemini API.
-    // If GEMINI_API_KEY is absent, we skip to rule_based_fallback.
-    const geminiKey = process.env.GEMINI_API_KEY;
-    if (!geminiKey) return null;
+    // Quality judge uses Vertex AI via ADC (same service-account flow as generation).
+    const project = process.env.GOOGLE_CLOUD_PROJECT;
+    const location = process.env.VERTEX_LOCATION || process.env.GOOGLE_CLOUD_LOCATION || 'global';
+    if (!project) {
+      console.warn("[QualityGate] No GOOGLE_CLOUD_PROJECT — skipping multimodal judge");
+      return null;
+    }
 
     const { GoogleGenAI } = await import("@google/genai");
-    const ai = new GoogleGenAI({ apiKey: geminiKey });
+    const ai = new GoogleGenAI({ vertexai: true, project, location } as any);
 
     const evaluationPrompt = `You are a professional portrait photography quality judge specializing in identity preservation.
 Compare the REFERENCE photo (first image) with the GENERATED photo (second image).

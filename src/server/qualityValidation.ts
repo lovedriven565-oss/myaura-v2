@@ -238,7 +238,9 @@ Respond ONLY with valid JSON, no markdown:
 }`;
 
   try {
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    const project = process.env.GOOGLE_CLOUD_PROJECT;
+    const location = process.env.VERTEX_LOCATION || process.env.GOOGLE_CLOUD_LOCATION || 'global';
+    const ai = new GoogleGenAI({ vertexai: true, project, location } as any);
 
     const response = await ai.models.generateContent({
       model: "gemini-2.0-flash",
