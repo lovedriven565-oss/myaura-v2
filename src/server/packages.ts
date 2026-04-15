@@ -22,11 +22,13 @@ export interface PackageConfig {
   retentionDefault: number;
 }
 
+const FREE_V2 = process.env.FREE_MULTI_REF_V2_ENABLED === "true";
+
 export const PACKAGES: Record<PackageId, PackageConfig> = {
   free: {
     id: "free",
     minRefs: 1,
-    maxRefs: 1,
+    maxRefs: FREE_V2 ? 5 : 1,
     outputCount: 1,
     maxStyles: 1,
     promptTier: "free",
@@ -128,33 +130,13 @@ export function getGenerationConfig(packageId: PackageId): { concurrency: number
   return { concurrency: 1, delayMs: parseInt(process.env.INTER_REQUEST_DELAY_MS || "6000") };
 }
 
-// Retry wrapper with exponential backoff for 429 rate limit errors
+// Error isolation wrapper: lets the task throw without crashing the queue.
+// 429 / rate-limit retries are handled exclusively in ai.ts withExponentialBackoff
+// to avoid conflicting backoff timers and log noise.
 async function withRetry<R>(
   fn: () => Promise<R>,
-  maxRetries: number = 2,
-  baseDelayMs: number = 5_000
 ): Promise<R> {
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      return await fn();
-    } catch (error: any) {
-      const is429 = error?.status === 429 ||
-                    error?.message?.includes("429") ||
-                    error?.message?.includes("RESOURCE_EXHAUSTED");
-
-      if (is429 && attempt < maxRetries) {
-        const delay = baseDelayMs * Math.pow(2, attempt); // 5s, 10s
-        console.warn(`Rate limited (429), retrying in ${delay / 1000}s (attempt ${attempt + 1}/${maxRetries})`);
-        await new Promise(r => setTimeout(r, delay));
-        continue;
-      }
-      if (is429) {
-        throw new Error("Google Cloud Quota reached. Please try again in a moment.");
-      }
-      throw error;
-    }
-  }
-  throw new Error("withRetry: unreachable");
+  return fn();
 }
 
 // Governed batch execution via p-queue.

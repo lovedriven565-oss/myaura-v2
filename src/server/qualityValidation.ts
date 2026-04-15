@@ -174,7 +174,7 @@ async function curateInputs(
   imageFiles: { buffer: Buffer; originalname: string }[]
 ): Promise<{ buffer: Buffer; originalname: string }[]> {
   const { selectBestReferencePhotos } = await import("./inputCuration.js");
-  const result = selectBestReferencePhotos(imageFiles);
+  const result = await selectBestReferencePhotos(imageFiles);
   if (result.selectedIndices.length > 0) {
     return result.selectedIndices.map(i => imageFiles[i]);
   }

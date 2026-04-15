@@ -19,8 +19,11 @@ function getTelegramIds(): { chatId: string | null; userId: string | null } {
   }
 }
 
+const FREE_V2 = import.meta.env.VITE_FREE_MULTI_REF_V2_ENABLED === "true";
+const FREE_MAX_PHOTOS = FREE_V2 ? 5 : 1;
+
 export default function UploadFree() {
-  const [file, setFile] = useState<File | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [agreed, setAgreed] = useState(false);
@@ -55,10 +58,16 @@ export default function UploadFree() {
   }, [tgUserId]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      setFile(e.target.files[0]);
+    if (e.target.files && e.target.files.length > 0) {
+      const newFiles = Array.from(e.target.files);
+      const merged = [...files, ...newFiles].slice(0, FREE_MAX_PHOTOS);
+      setFiles(merged);
       setError("");
     }
+  };
+
+  const removeFile = (index: number) => {
+    setFiles(prev => prev.filter((_, i) => i !== index));
   };
 
   const handleUpload = async () => {
@@ -67,8 +76,8 @@ export default function UploadFree() {
       navigate("/premium");
       return;
     }
-    if (!file) {
-      setError("Пожалуйста, выберите фото");
+    if (files.length === 0) {
+      setError("Пожалуйста, выберите хотя бы одно фото");
       return;
     }
     if (!agreed) {
@@ -88,7 +97,7 @@ export default function UploadFree() {
     }
     
     const formData = new FormData();
-    formData.append("images", file);
+    files.forEach(f => formData.append("images", f));
     formData.append("packageId", "free");
     formData.append("mode", "preview");
     formData.append("styleIds", JSON.stringify(["business"]));
@@ -127,6 +136,12 @@ export default function UploadFree() {
         return;
       }
 
+      if (res.status === 400 && data.code === "PHOTO_QUALITY_REJECTED") {
+        setError(data.error || "Фото не прошли проверку качества. Загрузите более чёткие фото.");
+        setLoading(false);
+        return;
+      }
+
       if (!res.ok) throw new Error("Произошла ошибка при генерации. Попробуйте ещё раз.");
 
       // Async mode: server returns { id, status: "processing" }
@@ -156,7 +171,9 @@ export default function UploadFree() {
         <section className="mb-6">
           <h1 className="text-3xl font-light tracking-tight mb-2">Бесплатный Preview</h1>
           <p className="text-white/60 text-[15px] leading-relaxed font-light">
-            Загрузите одно селфи, чтобы увидеть качество генерации.
+            {FREE_V2
+              ? "Загрузите до 5 фото для лучшего сохранения внешности."
+              : "Загрузите одно селфи, чтобы увидеть качество генерации."}
           </p>
         </section>
 
@@ -178,22 +195,58 @@ export default function UploadFree() {
           )}
         </div>
 
-        <label className="relative group cursor-pointer mb-8 block">
-          <input type="file" accept="image/jpeg, image/png" className="hidden" onChange={handleFileChange} />
-          <div className="w-full aspect-[4/5] rounded-2xl bg-white/[0.02] border border-white/10 flex flex-col items-center justify-center overflow-hidden transition-all duration-300 hover:bg-white/[0.04] hover:border-white/20 relative">
-            {file ? (
-              <img src={URL.createObjectURL(file)} alt="Preview" className="w-full h-full object-cover" />
-            ) : (
-              <div className="flex flex-col items-center text-center p-8 z-10">
-                <div className="w-16 h-16 rounded-full bg-white/5 flex items-center justify-center mb-6 group-hover:scale-110 transition-transform duration-300">
-                  <Camera className="text-[#d8b4fe] w-8 h-8" />
-                </div>
-                <p className="text-[15px] font-medium text-white/90 mb-1">Нажмите для загрузки</p>
-                <p className="text-[13px] text-white/50">JPG, PNG до 10 МБ</p>
+        {/* Photo upload area */}
+        {FREE_V2 ? (
+          <div className="mb-8">
+            {files.length > 0 && (
+              <div className="grid grid-cols-3 gap-2 mb-3">
+                {files.map((f, i) => (
+                  <div key={i} className="relative aspect-square rounded-xl overflow-hidden border border-white/10">
+                    <img src={URL.createObjectURL(f)} alt={`Photo ${i + 1}`} className="w-full h-full object-cover" />
+                    <button
+                      type="button"
+                      onClick={() => removeFile(i)}
+                      className="absolute top-1 right-1 w-6 h-6 rounded-full bg-black/60 flex items-center justify-center hover:bg-red-500/80 transition-colors"
+                    >
+                      <X className="w-3.5 h-3.5 text-white" />
+                    </button>
+                  </div>
+                ))}
               </div>
             )}
+            {files.length < FREE_MAX_PHOTOS && (
+              <label className="relative group cursor-pointer block">
+                <input type="file" accept="image/jpeg, image/png" className="hidden" onChange={handleFileChange} multiple />
+                <div className="w-full py-8 rounded-2xl bg-white/[0.02] border border-dashed border-white/10 flex flex-col items-center justify-center transition-all duration-300 hover:bg-white/[0.04] hover:border-white/20">
+                  <div className="w-12 h-12 rounded-full bg-white/5 flex items-center justify-center mb-3 group-hover:scale-110 transition-transform duration-300">
+                    <Camera className="text-[#d8b4fe] w-6 h-6" />
+                  </div>
+                  <p className="text-[14px] font-medium text-white/90 mb-0.5">
+                    {files.length === 0 ? "Нажмите для загрузки" : "Добавить ещё фото"}
+                  </p>
+                  <p className="text-[12px] text-white/40">{files.length}/{FREE_MAX_PHOTOS} фото · JPG, PNG</p>
+                </div>
+              </label>
+            )}
           </div>
-        </label>
+        ) : (
+          <label className="relative group cursor-pointer mb-8 block">
+            <input type="file" accept="image/jpeg, image/png" className="hidden" onChange={handleFileChange} />
+            <div className="w-full aspect-[4/5] rounded-2xl bg-white/[0.02] border border-white/10 flex flex-col items-center justify-center overflow-hidden transition-all duration-300 hover:bg-white/[0.04] hover:border-white/20 relative">
+              {files.length > 0 ? (
+                <img src={URL.createObjectURL(files[0])} alt="Preview" className="w-full h-full object-cover" />
+              ) : (
+                <div className="flex flex-col items-center text-center p-8 z-10">
+                  <div className="w-16 h-16 rounded-full bg-white/5 flex items-center justify-center mb-6 group-hover:scale-110 transition-transform duration-300">
+                    <Camera className="text-[#d8b4fe] w-8 h-8" />
+                  </div>
+                  <p className="text-[15px] font-medium text-white/90 mb-1">Нажмите для загрузки</p>
+                  <p className="text-[13px] text-white/50">JPG, PNG до 10 МБ</p>
+                </div>
+              )}
+            </div>
+          </label>
+        )}
 
         {error && <div className="text-red-400 text-[14px] mb-6 text-center bg-red-400/10 py-3 rounded-xl border border-red-400/20">{error}</div>}
 
@@ -202,7 +255,7 @@ export default function UploadFree() {
             <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center shrink-0">
               <Camera className="text-[#d8b4fe] w-5 h-5" />
             </div>
-            <p className="text-[14px] font-medium text-white/90">Одно лицо крупным планом</p>
+            <p className="text-[14px] font-medium text-white/90">{FREE_V2 ? "Лицо крупным планом, 1-5 фото" : "Одно лицо крупным планом"}</p>
           </div>
           <div className="flex items-center gap-4 p-4 rounded-xl bg-white/[0.03] border border-white/5">
             <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center shrink-0">

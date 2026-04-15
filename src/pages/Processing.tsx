@@ -12,7 +12,7 @@ function getTgUserId(): string | null {
   return uid ? String(uid) : null;
 }
 
-const TIMEOUT_MS = 25 * 60 * 1000; // 25 minutes hard ceiling (7 photos × ~3min each)
+const TIMEOUT_MS = 240 * 60 * 1000; // 4 hours hard ceiling (to comfortably support 100+ photo Max package generations)
 
 const PROCESSING_MESSAGES = [
   "Анализируем черты лица...",
@@ -118,7 +118,7 @@ export default function Processing() {
       } catch (err) {
         console.error("Polling error", err);
       }
-    }, 4000);
+    }, 6000);
 
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [id, navigate]);
@@ -213,16 +213,20 @@ export default function Processing() {
 
         <div className="text-center space-y-3 px-4 mb-10">
           <h1 className="text-2xl font-light tracking-tight text-white leading-tight">
-            {isMulti ? "Генерируем портреты..." : "Создаем ваш образ..."}
+            {isMulti
+              ? `Генерируем ваши образы: ${progress.completed} из ${progress.total}...`
+              : "Создаем ваш образ..."}
           </h1>
           {isMulti ? (
             <>
-              <p className="text-white/60 text-[15px] font-light">
-                Готово {progress.completed} из {progress.total}
-                {progress.failed > 0 && (
-                  <span className="text-red-400/80"> ({progress.failed} с ошибкой)</span>
-                )}
+              <p className="text-[11px] uppercase tracking-[0.18em] text-[#c084fc]/60 font-medium">
+                Nano Banana Pro · максимальная детализация
               </p>
+              {progress.failed > 0 && (
+                <p className="text-red-400/70 text-[13px] font-light">
+                  {progress.failed} {progress.failed === 1 ? "не удалось" : "не удалось"}
+                </p>
+              )}
               <p className="text-[#c084fc]/80 text-[14px] font-light">
                 {etaText ? `Осталось ~${etaText}` : "Считаем время..."}
               </p>

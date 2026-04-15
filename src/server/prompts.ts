@@ -3,37 +3,38 @@ export type StyleId = "business" | "lifestyle" | "aura" | "cinematic" | "luxury"
 export type AgeTier = "young" | "mature" | "distinguished";
 export type Gender = "male" | "female" | "unset";
 
-// ─── V6: Scene Compositions (trigger-word free) ─────────────────────────────
+// ─── V7.0: Architectural Overhaul - Optical & Slavic Optimizations ───────────────
 const SCENE_COMPOSITIONS: Record<StyleId, { wardrobe: string; setting: string; mood: string }> = {
-  business:  { wardrobe: "Navy wool blazer, white structured cotton shirt", setting: "Contemporary office interior, glass partitions, diffused window light in background", mood: "Composed, approachable, professional" },
-  lifestyle: { wardrobe: "Beige cashmere knitwear, tailored neutral trousers", setting: "Outdoor mountain terrace, golden-hour warm ambient light", mood: "Relaxed, candid, natural confidence" },
-  cinematic: { wardrobe: "Dark structured jacket or premium fabric top", setting: "Minimal studio or urban interior, atmospheric practical lights in background", mood: "Controlled emotion, directional lighting drama" },
-  editorial: { wardrobe: "Avant-garde structured garment with strong silhouette", setting: "Clean studio backdrop, minimal props, sharp foreground focus", mood: "High-fashion precision, luminous detail" },
-  luxury:    { wardrobe: "Bespoke silk and cashmere layering, muted heritage palette", setting: "Grand estate interior — mahogany shelves, leather furniture, warm reading lamps", mood: "Understated sophistication, timeless composure" },
-  aura:      { wardrobe: "Flowing fabric with iridescent sheen", setting: "Abstract backdrop with volumetric light refraction and soft pastel gradients", mood: "Ethereal radiance — face sharp, background edges dissolve into light" }
+  business:  { wardrobe: "Navy wool blazer, white structured cotton shirt", setting: "Contemporary office interior, glass partitions, diffused window light in background", mood: "Composed, professional" },
+  lifestyle: { wardrobe: "Beige cashmere knitwear, tailored neutral trousers", setting: "Outdoor mountain terrace, golden-hour ambient light", mood: "Relaxed, natural confidence" },
+  cinematic: { wardrobe: "Dark structured jacket or premium fabric top", setting: "Minimal studio or urban interior, practical lights", mood: "Controlled emotion, drama" },
+  editorial: { wardrobe: "Avant-garde structured garment with strong silhouette", setting: "Clean studio backdrop, sharp foreground focus", mood: "High-fashion precision" },
+  luxury:    { wardrobe: "Bespoke silk and cashmere layering, muted palette", setting: "Grand estate interior, warm reading lamps", mood: "Understated sophistication" },
+  aura:      { wardrobe: "Flowing fabric with iridescent sheen", setting: "Abstract backdrop with volumetric light refraction", mood: "Ethereal radiance" }
 };
 
-// ─── V6: Photography Physics (technical only, no semantic labels) ─────────────
+// V7.0: Strict Sony A7IV / Optical Physics emulation
 const PHOTOGRAPHY_PHYSICS: Record<StyleId, { lens: string; lighting: string; color_grade: string }> = {
-  business:  { lens: "85mm portrait equivalent, f/1.8 shallow depth of field, creamy background bokeh", lighting: "Dual soft-box frontal fill, even face illumination, zero hard shadows", color_grade: "Natural skin tones, slight warmth, clean neutral highlights, subtle film grain" },
-  lifestyle: { lens: "50mm, f/2.0 moderate depth of field, natural background separation", lighting: "Warm backlight with soft reflector fill on face, golden-hour quality", color_grade: "Warm amber tones, natural saturation, gentle highlight roll-off, organic film grain" },
-  cinematic: { lens: "35mm, f/1.4 crisp foreground with deep background bokeh", lighting: "45° directional key light, soft opposite fill, practical background bokeh", color_grade: "Teal-shifted shadows, orange midtones on skin, deep detailed blacks, cinematic film grain" },
-  editorial: { lens: "Medium format equivalent, f/2.8 — compression, micro-detail latitude, razor-sharp focus plane", lighting: "Overhead butterfly from beauty dish, defined cheekbone shadow line", color_grade: "High-fidelity skin reproduction, luminous whites, clean contrast, fine-grain texture" },
-  luxury:    { lens: "Portrait telephoto 90mm, f/1.6 very shallow depth, lush background bokeh", lighting: "Wrapped soft-box with warm practical ambient from interior lamps", color_grade: "Rich warm shadows with texture retention, classic analogue film grain" },
-  aura:      { lens: "50mm, f/1.2 sharp center focus, extreme background bokeh and light diffusion", lighting: "Multi-source volumetric ambient with pastel-colored fill, face center-exposed", color_grade: "Iridescent highlight bloom on edges, face at accurate neutral exposure, dreamlike film grain" }
+  business:  { lens: "Sony A7IV, 85mm f/1.4 GM lens, shallow depth of field", lighting: "Dual soft-box frontal fill, zero hard shadows", color_grade: "S-Cinetone profile, natural skin tones, 35mm organic film grain" },
+  lifestyle: { lens: "Sony A7IV, 50mm f/1.2 GM lens", lighting: "Warm backlight with soft reflector fill on face", color_grade: "S-Log3 converted to Rec.709, warm amber tones, 35mm organic film grain" },
+  cinematic: { lens: "Sony A7IV, 35mm f/1.4 GM lens", lighting: "45° directional key light, soft opposite fill", color_grade: "Teal-and-orange shifted shadows, cinematic 35mm film grain" },
+  editorial: { lens: "Medium format equivalent, f/2.8 sharp focus plane", lighting: "Overhead butterfly from beauty dish", color_grade: "High-fidelity skin reproduction, clean contrast, fine-grain texture" },
+  luxury:    { lens: "Sony A7IV, 85mm f/1.4 GM lens, lush bokeh", lighting: "Wrapped soft-box with warm practical ambient", color_grade: "Rich warm shadows, classic analogue film grain" },
+  aura:      { lens: "Sony A7IV, 50mm f/1.2 GM lens, extreme diffusion", lighting: "Multi-source volumetric ambient", color_grade: "Iridescent highlight bloom, dreamlike film grain" }
 };
 
-// ─── V6: Variety framings for multi-image premium batches ────────────────────
 const VARIETY_FRAMINGS = [
-  "Straight-on frontal framing, face perfectly centered",
+  "Frontal portrait, face perfectly centered",
   "Slight 3/4 turn left, natural shoulder angle",
-  "Medium shot including upper chest, composed stance",
-  "Tighter facial crop from mid-chest up",
-  "Slightly wider environmental framing with background context",
-  "Slight 3/4 turn right, relaxed natural posture"
+  "Medium shot including upper chest",
+  "Tighter facial crop",
+  "Environmental framing with background context",
+  "Slight 3/4 turn right, relaxed posture"
 ];
 
-// ─── V6: Core Natural Language prompt builder ─────────────────────────────
+// V7.0: Regional Anthropometry — Slavic/Eastern European markers
+const SLAVIC_MORPHOTYPE = "soft heart-shaped face, light Slavic eyes (blue/grey/green), fair skin with rosy undertones, straight soft nose profile";
+
 function buildNaturalLanguagePrompt(gender: Gender, styleId: StyleId, ageTier: AgeTier, mode: PromptType, index: number): string {
   const scene = SCENE_COMPOSITIONS[styleId] || SCENE_COMPOSITIONS.business;
   const physics = PHOTOGRAPHY_PHYSICS[styleId] || PHOTOGRAPHY_PHYSICS.business;
@@ -42,30 +43,22 @@ function buildNaturalLanguagePrompt(gender: Gender, styleId: StyleId, ageTier: A
 
   let prompt = "";
 
-  // 1. CRITICAL CONSTRAINT (Weight: Maximum)
   if (gender !== "unset") {
-    prompt += `[CRITICAL REQUIREMENT: THIS PORTRAIT DEPICTS A ${gender.toUpperCase()}. All anatomical and visual features MUST strictly match a ${gender}. Do not generate a ${gender === "female" ? "male" : "female"}.] `;
+    prompt += `[REQUIREMENT: EXACTLY MATCH ${gender.toUpperCase()} GENDER.] `;
   }
 
-  // 2. BASE DIRECTIVE
-  prompt += "Generate an ultra-high resolution, photorealistic styled portrait, indistinguishable from a professional photograph. ";
-
-  // 3. SUBJECT
-  prompt += `Subject: Attractive ${genderLabel}, age tier: ${ageTier}. Natural look, highly detailed photorealistic skin, clear engaging eyes, confident relaxed expression. `;
+  // 1. Core Directives & Likeness (Token Optimized)
   if (mode === "premium") {
-    prompt += `Ignore reference clothing. `;
+    prompt += `Subject: Person from reference image. Identity anchor: EXACT facial structure, eye spacing, lip shape, jawline, and skin tone. Maintain absolute strict physical likeness to the reference. Preserve the exact original eye color, facial structure, and skin tone. Do not alter the subject's fundamental ethnic or physical traits. Apply the high-end studio lighting and style ONLY to the environment and the subject's overall polish, but never at the cost of changing their native facial identity. Real ${genderLabel}, ${ageTier} age tier. Anthropometric traits: ${SLAVIC_MORPHOTYPE}. `;
   } else {
-    prompt += `Preserve general clothing character from reference image, styled for ${genderLabel}. `;
+    prompt += `Subject: Real ${genderLabel}, ${ageTier} age tier. Anthropometric traits: ${SLAVIC_MORPHOTYPE}. Preserve reference face structure, original eye color, and native facial identity. `;
   }
 
-  // 4. SCENE & WARDROBE
-  prompt += `Wardrobe: ${scene.wardrobe}. Setting: ${scene.setting}. Mood: ${scene.mood}. `;
-
-  // 5. PHOTOGRAPHY PHYSICS
-  prompt += `Camera and Lighting: ${physics.lens}. ${physics.lighting}. ${physics.color_grade}. `;
+  // 2. Optical & Scene Physics (Sony A7IV)
+  prompt += `Shot with ${physics.lens}. Wardrobe: ${scene.wardrobe}. Setting: ${scene.setting}. Lighting: ${physics.lighting}. Color grading: ${physics.color_grade}. `;
   
-  // 6. FRAMING
-  prompt += `Framing: ${framing}.`;
+  // 3. Anchors & Framing
+  prompt += `Framing: ${framing}. Stability anchors: symmetrical pupils, anatomical knuckle definition, realistic skin-to-hair transition. No plastic beauty filters.`;
 
   return prompt;
 }
@@ -78,18 +71,15 @@ export function buildPromptProfile(
   gender: Gender = "unset"
 ): { positivePrompt: string; negativePrompt: string; debugPromptParts: any } {
   const positivePrompt = buildNaturalLanguagePrompt(gender, styleId, ageTier, mode, index);
-  // Minimal negative prompt — long lists pollute the attention softmax and dilute identity lock
+  // Negative prompt minimized to prevent attention softmax dilution
   const negativePrompt = "mutated, deformed, facial reconstruction, different person";
 
   const debugPromptParts = {
-    version: "V6-NL",
-    styleId, mode, gender, ageTier, index,
-    framing: VARIETY_FRAMINGS[index % VARIETY_FRAMINGS.length],
-    scene: SCENE_COMPOSITIONS[styleId],
-    physics: PHOTOGRAPHY_PHYSICS[styleId]
+    version: "V7.0-Architect",
+    styleId, mode, gender, ageTier, index
   };
 
-  console.log(`[PROMPT V6-NL] style=${styleId} mode=${mode} gender=${gender} ageTier=${ageTier} idx=${index}`);
+  console.log(`[PROMPT V7.0] style=${styleId} mode=${mode} gender=${gender} idx=${index}`);
   return { positivePrompt, negativePrompt, debugPromptParts };
 }
 

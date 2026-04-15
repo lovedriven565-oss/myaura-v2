@@ -4,7 +4,7 @@
  */
 
 import { useState, useEffect, type ReactNode } from "react";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Routes, Route, useNavigate, useLocation } from "react-router-dom";
 import Home from "./pages/Home";
 import UploadFree from "./pages/UploadFree";
 import UploadPremium from "./pages/UploadPremium";
@@ -12,6 +12,68 @@ import Processing from "./pages/Processing";
 import Result from "./pages/Result";
 import Privacy from "./pages/Privacy";
 import Terms from "./pages/Terms";
+
+function StateRecoveryWrapper({ children }: { children: ReactNode }) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    const uid = (window as any).Telegram?.WebApp?.initDataUnsafe?.user?.id;
+    const key = uid ? `myaura_active_gen_${uid}` : "myaura_active_gen";
+    const activeId = localStorage.getItem(key);
+
+    if (!activeId) {
+      setChecking(false);
+      return;
+    }
+
+    // Skip redirect if already on processing or result
+    if (location.pathname.startsWith('/processing/') || location.pathname.startsWith('/result/')) {
+      setChecking(false);
+      return;
+    }
+
+    // Validate the active session against the backend
+    const statusUrl = uid ? `/api/status/${activeId}?tgUserId=${uid}` : `/api/status/${activeId}`;
+    fetch(statusUrl)
+      .then(async r => {
+        if (r.status === 403 || r.status === 404) {
+          localStorage.removeItem(key);
+          return null;
+        }
+        return r.json();
+      })
+      .then(d => {
+        if (!d) {
+          setChecking(false);
+          return;
+        }
+        if (d.status === "processing" || d.status === "pending") {
+          navigate(`/processing/${activeId}`, { replace: true });
+        } else if (d.status === "completed" || d.status === "partial") {
+          navigate(`/result/${activeId}`, { replace: true });
+        } else {
+          localStorage.removeItem(key);
+          setChecking(false);
+        }
+      })
+      .catch(() => {
+        localStorage.removeItem(key);
+        setChecking(false);
+      });
+  }, [navigate, location.pathname]);
+
+  if (checking && !location.pathname.startsWith('/processing/') && !location.pathname.startsWith('/result/')) {
+    return (
+      <div className="min-h-screen bg-[#0a0a0a] flex items-center justify-center">
+        <div className="w-8 h-8 border-2 border-[#c084fc] border-t-transparent rounded-full animate-spin"></div>
+      </div>
+    );
+  }
+
+  return <>{children}</>;
+}
 
 function AuthWrapper({ children }: { children: ReactNode }) {
   const [isReady, setIsReady] = useState(false);
@@ -44,6 +106,16 @@ function AuthWrapper({ children }: { children: ReactNode }) {
         if (!res.ok) {
           const errData = await res.json();
           throw new Error(JSON.stringify(errData));
+        }
+
+        const data = await res.json();
+        const genKey = user.id ? `myaura_active_gen_${user.id}` : "myaura_active_gen";
+        
+        if (data.activeGenerationId) {
+          localStorage.setItem(genKey, data.activeGenerationId);
+        } else {
+          // Clean up old phantom states
+          localStorage.removeItem(genKey);
         }
 
         setIsReady(true);
@@ -82,13 +154,13 @@ export default function App() {
     <AuthWrapper>
       <BrowserRouter>
         <Routes>
-          <Route path="/" element={<Home />} />
-          <Route path="/upload" element={<UploadFree />} />
-          <Route path="/premium" element={<UploadPremium />} />
-          <Route path="/processing/:id" element={<Processing />} />
-          <Route path="/result/:id" element={<Result />} />
-          <Route path="/privacy" element={<Privacy />} />
-          <Route path="/terms" element={<Terms />} />
+          <Route element={<StateRecoveryWrapper><Home /></StateRecoveryWrapper>} path="/" />
+          <Route element={<StateRecoveryWrapper><UploadFree /></StateRecoveryWrapper>} path="/upload" />
+          <Route element={<StateRecoveryWrapper><UploadPremium /></StateRecoveryWrapper>} path="/premium" />
+          <Route element={<Processing />} path="/processing/:id" />
+          <Route element={<Result />} path="/result/:id" />
+          <Route element={<Privacy />} path="/privacy" />
+          <Route element={<Terms />} path="/terms" />
         </Routes>
       </BrowserRouter>
     </AuthWrapper>

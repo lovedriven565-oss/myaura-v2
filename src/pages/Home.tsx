@@ -4,35 +4,6 @@ import { Sparkles, Star, ArrowRight, ShieldCheck, Image as ImageIcon, Crown, Mov
 
 export default function Home() {
   const [sliderPos, setSliderPos] = useState(50);
-  const navigate = useNavigate();
-
-  // Session Recovery: if user closed the app mid-generation, resume automatically
-  useEffect(() => {
-    const uid = (window as any).Telegram?.WebApp?.initDataUnsafe?.user?.id;
-    const key = uid ? `myaura_active_gen_${uid}` : "myaura_active_gen";
-    const activeId = localStorage.getItem(key);
-    if (!activeId) return;
-    const statusUrl = uid ? `/api/status/${activeId}?tgUserId=${uid}` : `/api/status/${activeId}`;
-    fetch(statusUrl)
-      .then(async r => {
-        if (r.status === 403 || r.status === 404) {
-          localStorage.removeItem(key);
-          return null;
-        }
-        return r.json();
-      })
-      .then(d => {
-        if (!d) return;
-        if (d.status === "processing") {
-          navigate(`/processing/${activeId}`, { replace: true });
-        } else if (d.status === "completed" || d.status === "partial") {
-          navigate(`/result/${activeId}`, { replace: true });
-        } else {
-          localStorage.removeItem(key);
-        }
-      })
-      .catch(() => localStorage.removeItem(key));
-  }, [navigate]);
 
   return (
     <div className="min-h-screen pb-32 bg-[#0a0a0a] text-white font-sans selection:bg-purple-500/30">

@@ -330,6 +330,30 @@ apiRouter.post("/generate",
     const gender: Gender = validGenders.includes(req.body.gender) ? req.body.gender as Gender : "unset";
     console.log(`[${id}] gender=${gender}`);
 
+    // ── Free V2: quality-gate BEFORE credit consumption ──────────────
+    const FREE_V2 = process.env.FREE_MULTI_REF_V2_ENABLED === "true";
+    let freeV2CuratedIndices: number[] = [];
+
+    if (FREE_V2 && mode !== 'premium' && imageFiles.length > 1) {
+      const curation = await selectBestReferencePhotos(
+        imageFiles.map(f => ({ buffer: f.buffer, originalname: f.originalname })),
+        { mode: 'free' },
+      );
+      console.log(`[${id}] [FREE_V2] Curation: ${imageFiles.length}→${curation.selectedIndices.length} selected | ${curation.telemetry.latencyMs}ms`);
+      if (curation.warnings.length > 0) {
+        console.log(`[${id}] [FREE_V2] Warnings: ${curation.warnings.join('; ')}`);
+      }
+      if (curation.hardReject) {
+        console.warn(`[${id}] [FREE_V2] HARD REJECT: ${curation.hardRejectReason}`);
+        return res.status(400).json({
+          error: curation.hardRejectReason,
+          code: "PHOTO_QUALITY_REJECTED",
+        });
+      }
+      freeV2CuratedIndices = curation.selectedIndices;
+      console.log(`[${id}] [FREE_V2] Selected indices: [${freeV2CuratedIndices.join(',')}]`);
+    }
+
     if (telegramUserId) {
       const { data: user, error: userError } = await db
         .from("users")
@@ -408,38 +432,31 @@ apiRouter.post("/generate",
       const genConfig = getGenerationConfig(config.id);
       console.log(`[${id}] Schedule: ${schedule.length} images, concurrency=${genConfig.concurrency}, delay=${genConfig.delayMs}ms`);
 
-      // Input curation for premium mode: select best reference photos
-      let curatedFiles = imageFiles;
-      if (mode === 'premium' && imageFiles.length > 1) {
-        const curation = selectBestReferencePhotos(
-          imageFiles.map(f => ({ buffer: f.buffer, originalname: f.originalname }))
-        );
-        console.log(`[${id}] Input curation: ${imageFiles.length} files → ${curation.selectedIndices.length} selected`);
-        if (curation.warnings.length > 0) {
-          console.log(`[${id}] Curation warnings: ${curation.warnings.join('; ')}`);
-        }
-        if (curation.hardReject) {
-          console.warn(`[${id}] Curation hard reject: ${curation.hardRejectReason}`);
-          // Don't block generation — just warn and use all files as fallback
-          // The credit is already consumed, so we should still try our best
-        }
-        if (curation.selectedIndices.length > 0) {
-          curatedFiles = curation.selectedIndices.map(i => imageFiles[i]);
-        }
-      }
+      // Resolve final reference files for generation
+      // Free V2 (flag ON): use pre-curated files from quality gate above
+      // All other cases: use original uploaded files (stable behavior)
+      const finalFiles = (FREE_V2 && mode !== 'premium' && freeV2CuratedIndices.length > 0)
+        ? freeV2CuratedIndices.map(i => imageFiles[i])
+        : imageFiles;
 
       // Prepare images for AI provider
-      const baseFile = curatedFiles[0];
+      const baseFile = finalFiles[0];
       const base64Image = baseFile.buffer.toString("base64");
       const mimeType = baseFile.mimetype;
       
-      // For premium mode, prepare additional images as base64
-      const additionalImages = mode === 'premium' 
-        ? curatedFiles.slice(1).map(file => file.buffer.toString("base64"))
-        : [];
+      // Additional reference images
+      // Premium: pass all uploaded refs (original stable behavior, unchanged)
+      // Free V2 (flag ON): pass curated additional refs
+      // Free (flag OFF): no additional images (single file only)
+      let additionalImages: string[] = [];
+      if (mode === 'premium' && imageFiles.length > 1) {
+        additionalImages = imageFiles.slice(1).map(file => file.buffer.toString("base64"));
+      } else if (FREE_V2 && mode !== 'premium' && finalFiles.length > 1) {
+        additionalImages = finalFiles.slice(1).map(file => file.buffer.toString("base64"));
+      }
 
-      // Session isolation trace: confirm closure variables are bound to this session only
-      console.log(`[${id}] SESSION CONTEXT: userId=${telegramUserId}, refs=${curatedFiles.length}, base64Len=${base64Image.length}, additionalRefs=${additionalImages.length}`);
+      // Session isolation trace
+      console.log(`[${id}] SESSION CONTEXT: userId=${telegramUserId}, refs=${finalFiles.length}, base64Len=${base64Image.length}, additionalRefs=${additionalImages.length}, freeV2=${FREE_V2}`);
 
       // Progressive state tracking
       let completedCount = 0;
@@ -751,10 +768,20 @@ apiRouter.post("/auth", async (req, res, next) => {
       return res.status(500).json({ error: "Failed to fetch user data" });
     }
 
+    const { data: activeGen } = await db
+      .from("generations")
+      .select("id")
+      .eq("telegram_user_id", parseInt(telegramId, 10))
+      .in("status", ["pending", "processing"])
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .single();
+
     res.json({
       success: true,
       freeCredits: user?.free_credits ?? 0,
-      paidCredits: user?.paid_credits ?? 0
+      paidCredits: user?.paid_credits ?? 0,
+      activeGenerationId: activeGen?.id || null
     });
   } catch (error) {
     next(error);
