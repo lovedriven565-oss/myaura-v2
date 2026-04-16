@@ -9,10 +9,10 @@ export interface IGenerationProvider {
 // Dual-model segmentation:
 // FREE tier  → gemini-3.1-flash-image-preview (Nano Banana 2), fallback: gemini-2.5-flash-image
 // PREMIUM tier → gemini-3-pro-image-preview  (Nano Banana Pro), fallback: gemini-3.1-flash-image-preview
-const FREE_MODEL_PRIMARY   = "gemini-3.1-flash-image-preview";
-const FREE_MODEL_FALLBACK  = "gemini-2.5-flash-image";
-const PRO_MODEL_PRIMARY    = "gemini-3-pro-image-preview";
-const PRO_MODEL_FALLBACK   = "gemini-3.1-flash-image-preview";
+const FREE_MODEL_PRIMARY   = process.env.FREE_MODEL_ID || "gemini-3.1-flash-image-preview";
+const FREE_MODEL_FALLBACK  = process.env.FREE_MODEL_FALLBACK_ID || "gemini-2.5-flash-image";
+const PRO_MODEL_PRIMARY    = process.env.PREMIUM_MODEL_ID || "gemini-3-pro-image-preview";
+const PRO_MODEL_FALLBACK   = process.env.PREMIUM_MODEL_FALLBACK_ID || "gemini-3.1-flash-image-preview";
 
 // Retry configuration for resilience against 429 rate limits
 const MAX_RETRIES = 2;

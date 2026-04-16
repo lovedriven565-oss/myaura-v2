@@ -3,7 +3,7 @@ import { PromptType, StyleId } from "./prompts.js";
 
 // Global governed queue: strictly sequential, min 6s between task starts.
 // Prevents Thundering Herd / Token Bucket Exhaustion on Vertex AI.
-const generationQueue = new PQueue({
+export const generationQueue = new PQueue({
   concurrency: 1,
   interval: parseInt(process.env.INTER_REQUEST_DELAY_MS || "6000"),
   intervalCap: 1,
@@ -139,6 +139,8 @@ async function withRetry<R>(
   return fn();
 }
 
+const MAX_QUEUE_DEPTH = parseInt(process.env.MAX_QUEUE_DEPTH || "200");
+
 // Governed batch execution via p-queue.
 // Tasks run strictly one at a time with a minimum interval between starts.
 // No Promise.all — zero Thundering Herd risk.
@@ -153,6 +155,14 @@ export async function runBatched<T, R>(
 ): Promise<PromiseSettledResult<R>[]> {
   const { onItemComplete } = options;
   const results = new Array<PromiseSettledResult<R>>(items.length);
+
+  // Admission control: reject batch if queue is at capacity
+  if (generationQueue.size + items.length > MAX_QUEUE_DEPTH) {
+    throw Object.assign(
+      new Error(`Generation queue at capacity (depth=${generationQueue.size}). Please try again in a few minutes.`),
+      { code: "QUEUE_FULL", status: 429 }
+    );
+  }
 
   // Enqueue all tasks at once — queue governs when each one starts
   const taskPromises = items.map((item, i) =>

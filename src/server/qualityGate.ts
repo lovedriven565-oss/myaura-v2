@@ -44,7 +44,8 @@ async function multimodalJudge(
   try {
     // Quality judge uses Vertex AI via ADC (same service-account flow as generation).
     const project = process.env.GOOGLE_CLOUD_PROJECT;
-    const location = process.env.VERTEX_LOCATION || process.env.GOOGLE_CLOUD_LOCATION || 'global';
+    const location = process.env.VERTEX_LOCATION || 'global';
+    const judgeModel = process.env.JUDGE_MODEL_ID || "gemini-2.0-flash";
     if (!project) {
       console.warn("[QualityGate] No GOOGLE_CLOUD_PROJECT — skipping multimodal judge");
       return null;
@@ -69,7 +70,7 @@ Respond ONLY with a JSON object, no markdown, no explanation:
 {"likeness":N,"ageDrift":N,"skinRealism":N,"eyeConsistency":N,"premiumLook":N,"expressionScore":N}`;
 
     const response = await ai.models.generateContent({
-      model: "gemini-2.0-flash",
+      model: judgeModel,
       contents: [
         { inlineData: { data: referenceBase64, mimeType } },
         { inlineData: { data: generatedBase64, mimeType } },

@@ -214,6 +214,25 @@ export function initTelegramBot() {
 }
 
 /**
+ * Sends a Telegram notification to a referrer when their referral award is granted.
+ */
+export async function notifyReferralAwarded(telegramId: number): Promise<void> {
+  if (!botInstance) {
+    console.warn("[Referral] Telegram notify skipped: bot not initialized");
+    return;
+  }
+  try {
+    await botInstance.telegram.sendMessage(
+      telegramId,
+      "🎉 Твой друг активировал MyAURA — тебе начислена 1 бесплатная генерация!"
+    );
+    console.log(`[Referral] Notified referrer telegramId=${telegramId}`);
+  } catch (err: any) {
+    console.error(`[Referral] sendMessage failed for telegramId=${telegramId}:`, err.message);
+  }
+}
+
+/**
  * Delivers a single photo progressively during generation.
  * Called as each image completes, so user sees results immediately.
  */

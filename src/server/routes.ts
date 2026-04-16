@@ -5,8 +5,8 @@ import { getDb } from "./db.js";
 import { storage } from "./storage.js";
 import { aiProvider } from "./ai.js";
 import { buildPrompt, StyleId, AgeTier, Gender } from "./prompts.js";
-import { validatePackageInput, buildStyleSchedule, buildStyleScheduleWithCount, runBatched, getGenerationConfig, PACKAGES } from "./packages.js";
-import { deliverTelegramPhoto, deliverTelegramResults } from "./telegram.js";
+import { validatePackageInput, buildStyleSchedule, buildStyleScheduleWithCount, runBatched, getGenerationConfig, PACKAGES, generationQueue } from "./packages.js";
+import { deliverTelegramPhoto, deliverTelegramResults, notifyReferralAwarded } from "./telegram.js";
 import { selectBestReferencePhotos } from "./inputCuration.js";
 import { evaluateGeneratedPhoto, clearRerollTracking } from "./qualityGate.js";
 import crypto from "crypto";
@@ -172,6 +172,60 @@ function initDataAuthMiddleware(req: any, res: any, next: any) {
 
 // Apply initData auth middleware to all API routes
 apiRouter.use(initDataAuthMiddleware);
+
+// ─── Referral B-lite: Award Logic ────────────────────────────────────────────
+// Called after a free generation reaches status=completed.
+// Fully isolated: errors here never affect the generation result.
+async function tryAwardReferral(inviteeId: number, generationId: string): Promise<void> {
+  try {
+    const db = getDb();
+
+    // Fetch invitee's referred_by_code
+    const { data: invitee } = await db
+      .from("users")
+      .select("referred_by_code")
+      .eq("telegram_id", inviteeId)
+      .single();
+
+    const refCode = invitee?.referred_by_code;
+    if (!refCode) return; // Not a referred user
+
+    // Call the atomic RPC that handles all guards (self-ref, cap, idempotency)
+    const { data: awarded, error } = await db
+      .rpc("award_referral_bonus", {
+        p_referrer_code: refCode,
+        p_invitee_id: inviteeId,
+        p_gen_id: generationId,
+      });
+
+    if (error) {
+      console.error(`[Referral] award_referral_bonus error for invitee=${inviteeId}:`, error.message);
+      return;
+    }
+
+    if (!awarded) {
+      console.log(`[Referral] No award for invitee=${inviteeId} (cap/self-ref/duplicate)`);
+      return;
+    }
+
+    console.log(`[Referral] Award granted: invitee=${inviteeId}, refCode=${refCode}, gen=${generationId}`);
+
+    // Lookup referrer telegram_id for notification
+    const { data: referrer } = await db
+      .from("users")
+      .select("telegram_id")
+      .eq("referral_code", refCode)
+      .single();
+
+    if (referrer?.telegram_id) {
+      notifyReferralAwarded(referrer.telegram_id).catch(err =>
+        console.error(`[Referral] Telegram notify failed for referrer=${referrer.telegram_id}:`, err.message)
+      );
+    }
+  } catch (err: any) {
+    console.error(`[Referral] tryAwardReferral unexpected error:`, err.message);
+  }
+}
 
 // ─── Per-user Generation Rate Limiter ────────────────────────────────────────
 const _genRateMap = new Map<number, number>(); // userId → last generation timestamp (ms)
@@ -487,7 +541,10 @@ apiRouter.post("/generate",
           if (gate.shouldReroll) {
             console.log(`[${id}] Image ${index}: quality gate failed (score=${gate.score.overallScore}), attempting reroll...`);
             try {
-              resultBase64 = await aiProvider.generateImage(base64Image, mimeType, prompt, mode, additionalImages);
+              // A2: Reroll must also respect the global queue and rate limits
+              resultBase64 = await generationQueue.add(() => 
+                aiProvider.generateImage(base64Image, mimeType, prompt, mode, additionalImages)
+              ) as string;
               resultBuffer = Buffer.from(resultBase64, "base64");
               // Re-evaluate after reroll (just log, don't reroll again)
               const rerollGate = await evaluateGeneratedPhoto(
@@ -582,6 +639,11 @@ apiRouter.post("/generate",
         console.log(`[${id}] Cleaned up ${originalPaths.length} original file(s) from R2`);
       } catch (cleanupErr: any) {
         console.error(`[${id}] R2 cleanup error: ${cleanupErr.message}`);
+      }
+
+      // Referral award: fire after first completed free generation
+      if (finalStatus === "completed" && mode !== "premium" && telegramUserId) {
+        tryAwardReferral(telegramUserId, id).catch(() => {}); // errors are logged inside
       }
 
       // Final Telegram delivery: only for free/preview (1 image).
@@ -729,38 +791,47 @@ const STORE_PACKAGES = [
 apiRouter.post("/auth", async (req, res, next) => {
   try {
     console.log('AUTH PAYLOAD:', req.body);
-    const { telegramId, username } = req.body;
+    const { telegramId, username, startParam } = req.body;
     
     if (!telegramId) {
       return res.status(400).json({ error: "Telegram ID is required" });
     }
 
     const db = getDb();
+    const tid = parseInt(telegramId, 10);
     
     // Upsert user: only using telegram_id and username to avoid schema errors
-    const { data, error } = await db
+    const { error } = await db
       .from("users")
       .upsert(
         {
-          telegram_id: parseInt(telegramId, 10),
+          telegram_id: tid,
           username: username || null,
         },
         { onConflict: 'telegram_id', ignoreDuplicates: true } 
-      )
-      .select("free_credits, paid_credits")
-      .single();
+      );
 
     if (error && error.code !== 'PGRST116') {
       console.error("Auth upsert error:", error);
       return res.status(500).json({ error: "Failed to authenticate user", details: error });
     }
 
-    // If ignoreDuplicates hit (user exists), the upsert might return null data depending on Supabase version.
-    // Let's just fetch the current balance to return it.
+    // Ensure referral_code exists for this user (generates one if missing)
+    const { data: referralCodeRow } = await db
+      .rpc("ensure_referral_code", { p_telegram_id: tid });
+    const referralCode: string | null = referralCodeRow ?? null;
+
+    // One-time attribution: write referred_by_code only if currently NULL
+    if (startParam && typeof startParam === "string" && startParam.startsWith("ref_")) {
+      await db.rpc("set_referred_by", { p_telegram_id: tid, p_ref_code: startParam });
+      console.log(`[Referral] Attribution: user=${tid} referred_by=${startParam}`);
+    }
+
+    // Fetch current balance
     const { data: user, error: fetchError } = await db
       .from("users")
       .select("free_credits, paid_credits")
-      .eq("telegram_id", parseInt(telegramId, 10))
+      .eq("telegram_id", tid)
       .single();
 
     if (fetchError) {
@@ -771,7 +842,7 @@ apiRouter.post("/auth", async (req, res, next) => {
     const { data: activeGen } = await db
       .from("generations")
       .select("id")
-      .eq("telegram_user_id", parseInt(telegramId, 10))
+      .eq("telegram_user_id", tid)
       .in("status", ["pending", "processing"])
       .order("created_at", { ascending: false })
       .limit(1)
@@ -781,7 +852,8 @@ apiRouter.post("/auth", async (req, res, next) => {
       success: true,
       freeCredits: user?.free_credits ?? 0,
       paidCredits: user?.paid_credits ?? 0,
-      activeGenerationId: activeGen?.id || null
+      activeGenerationId: activeGen?.id || null,
+      referralCode,
     });
   } catch (error) {
     next(error);

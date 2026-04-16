@@ -92,6 +92,8 @@ function AuthWrapper({ children }: { children: ReactNode }) {
         }
 
         // Attempt to upsert the user
+        const startParam = tg?.initDataUnsafe?.start_param ?? null;
+
         const res = await fetch("/api/auth", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -99,7 +101,8 @@ function AuthWrapper({ children }: { children: ReactNode }) {
             telegramId: user.id,
             username: user.username,
             firstName: user.first_name,
-            lastName: user.last_name
+            lastName: user.last_name,
+            startParam,
           })
         });
 
@@ -110,6 +113,11 @@ function AuthWrapper({ children }: { children: ReactNode }) {
 
         const data = await res.json();
         const genKey = user.id ? `myaura_active_gen_${user.id}` : "myaura_active_gen";
+
+        // Persist referral code for share CTA
+        if (data.referralCode && user.id) {
+          localStorage.setItem(`myaura_ref_code_${user.id}`, data.referralCode);
+        }
         
         if (data.activeGenerationId) {
           localStorage.setItem(genKey, data.activeGenerationId);

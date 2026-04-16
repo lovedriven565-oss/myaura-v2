@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams, Link, useNavigate } from "react-router-dom";
-import { Sparkles, ArrowRight, Send, Wand2, Download, X, Image as ImageIcon, Camera, User, Crown } from "lucide-react";
+import { Sparkles, ArrowRight, Send, Wand2, Download, X, Image as ImageIcon, Camera, User, Crown, Gift } from "lucide-react";
 
 interface StatusData {
   status: string;
@@ -16,6 +16,23 @@ export default function Result() {
   const [data, setData] = useState<StatusData | null>(null);
   const [loading, setLoading] = useState(true);
   const [fullscreenUrl, setFullscreenUrl] = useState<string | null>(null);
+
+  const tg = (window as any).Telegram?.WebApp;
+  const uid = tg?.initDataUnsafe?.user?.id;
+  const referralCode = uid ? localStorage.getItem(`myaura_ref_code_${uid}`) : null;
+  const botUsername = import.meta.env.VITE_BOT_USERNAME || "myaura_bot";
+
+  function handleShare() {
+    if (!referralCode) return;
+    const refLink = `https://t.me/${botUsername}?startapp=${referralCode}`;
+    const text = "Попробуй MyAURA — AI-фотостудия в Telegram. Получи бесплатный портрет!";
+    const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(refLink)}&text=${encodeURIComponent(text)}`;
+    if (tg?.openTelegramLink) {
+      tg.openTelegramLink(shareUrl);
+    } else {
+      window.open(shareUrl, "_blank");
+    }
+  }
 
   useEffect(() => {
     const uid = (window as any).Telegram?.WebApp?.initDataUnsafe?.user?.id;
@@ -115,13 +132,23 @@ export default function Result() {
           </div>
         )}
 
-        <div className="w-full space-y-5 flex flex-col items-center">
+        <div className="w-full space-y-4 flex flex-col items-center">
           {!isPremium && (
             <Link to="/premium" className="w-full h-14 bg-gradient-to-r from-[#c084fc] to-[#a855f7] rounded-2xl text-white font-medium text-[15px] flex items-center justify-center gap-2 shadow-[0_0_30px_rgba(168,85,247,0.3)] hover:shadow-[0_0_40px_rgba(168,85,247,0.4)] transition-all active:scale-[0.98]">
               <Crown className="w-4 h-4 text-white/90" />
               <span>Создать Premium HD</span>
               <ArrowRight className="w-4 h-4 text-white/70 ml-1" />
             </Link>
+          )}
+
+          {!isPremium && referralCode && (
+            <button
+              onClick={handleShare}
+              className="w-full h-14 bg-white/[0.06] hover:bg-white/[0.10] border border-white/10 rounded-2xl text-white font-medium text-[15px] flex items-center justify-center gap-2 transition-all active:scale-[0.98]"
+            >
+              <Gift className="w-4 h-4 text-[#d8b4fe]" />
+              <span>Пригласить друга — получить генерацию</span>
+            </button>
           )}
           
           <div className="flex items-center gap-2">
