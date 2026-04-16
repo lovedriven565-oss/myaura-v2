@@ -830,7 +830,7 @@ export default function UploadPremium() {
 
 
 
-        <p className="text-center text-[10px] text-white/20 mt-6">v3.1 Premium</p>
+        <p className="text-center text-[10px] text-white/20 mt-6">v3.2 Premium</p>
 
       </main>
 
