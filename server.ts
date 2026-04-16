@@ -39,8 +39,10 @@ async function startServer() {
   } else {
     // Since server.js is in dist/, the client files are in the same directory (__dirname)
     const distPath = __dirname;
-    app.use(express.static(distPath));
+    // Assets are hashed — safe to cache long-term. index.html must never be stale.
+    app.use(express.static(distPath, { index: false }));
     app.get("*", (req, res) => {
+      res.set("Cache-Control", "no-cache, no-store, must-revalidate");
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
