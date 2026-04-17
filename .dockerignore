@@ -1,0 +1,59 @@
+# Dependencies
+node_modules/
+
+# Build output (we copy pre-built dist/)
+# Note: dist/ is NOT ignored — it must be built before docker build
+
+# Development files
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Environment (Cloud Run uses env vars, not .env file)
+.env
+.env.local
+.env.*.local
+
+# Testing
+ coverage/
+.nyc_output/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Documentation (not needed in container)
+*.md
+DEPLOY*.md
+README.md
+
+# Scripts (not needed in container)
+scripts/
+
+# Source files (pre-built in dist/)
+src/
+server.ts
+*.config.ts
+*.config.js
+!ecosystem.config.cjs
+
+tsconfig.json
+
+# Migrations (run separately if needed)
+migrations/
+supabase/
+
+# Misc
+*.drawio
+*.drawio.bkp
