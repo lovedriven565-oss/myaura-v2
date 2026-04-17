@@ -59,15 +59,24 @@ function validateInitData(initData: string): {
   valid: boolean;
   telegramId?: number;
   error?: string;
-  debug?: { receivedHash: string; calculatedHash: string; dataCheckString: string };
+  matchedStrategy?: "decoded" | "raw";
 } {
   if (!initData || !BOT_TOKEN) {
     return { valid: false, error: "Missing initData or BOT_TOKEN" };
   }
 
   try {
-    // Parse initData manually to preserve URL-encoding (URLSearchParams decodes values)
-    const params: Record<string, string> = {};
+    // Parse initData manually. For each key we keep BOTH the raw URL-encoded
+    // value and the URL-decoded value, because different Telegram clients
+    // (and different spec revisions) disagree on which form is signed. The
+    // official reference implementations (python `urllib.parse.parse_qsl`,
+    // @tma.js/init-data-node via URLSearchParams.entries()) use the decoded
+    // form, but some older/third-party clients pass the raw form. We check
+    // both below and accept the first match — identity is still anchored to
+    // a correct HMAC, just computed against whichever canonical form the
+    // signer used.
+    const paramsRaw: Record<string, string> = {};
+    const paramsDecoded: Record<string, string> = {};
     const pairs = initData.split("&");
     let hash: string | null = null;
 
@@ -76,12 +85,19 @@ function validateInitData(initData: string): {
       if (eqIndex === -1) continue;
 
       const key = pair.substring(0, eqIndex);
-      const value = pair.substring(eqIndex + 1); // Keep raw URL-encoded value
+      const rawValue = pair.substring(eqIndex + 1);
 
       if (key === "hash") {
-        hash = value;
-      } else {
-        params[key] = value;
+        hash = rawValue;
+        continue;
+      }
+      paramsRaw[key] = rawValue;
+      try {
+        paramsDecoded[key] = decodeURIComponent(rawValue);
+      } catch {
+        // Malformed percent-encoding — fall back to raw so at least one
+        // strategy has a chance.
+        paramsDecoded[key] = rawValue;
       }
     }
 
@@ -90,57 +106,64 @@ function validateInitData(initData: string): {
     }
 
     // Check auth_date freshness (anti-replay protection)
-    const authDate = params["auth_date"];
-    if (authDate) {
+    const authDate = paramsDecoded["auth_date"] || paramsRaw["auth_date"];
+    if (!authDate) {
+      return { valid: false, error: "Missing auth_date in initData" };
+    }
+    {
       const now = Math.floor(Date.now() / 1000);
       const authTimestamp = parseInt(authDate, 10);
       const age = now - authTimestamp;
-
       if (age > INIT_DATA_MAX_AGE_SECONDS || age < -60) {
         return { valid: false, error: `initData expired or invalid (age=${age}s, max=${INIT_DATA_MAX_AGE_SECONDS}s)` };
       }
-    } else {
-      return { valid: false, error: "Missing auth_date in initData" };
     }
 
-    // Build data_check_string by sorting keys alphabetically, joining with \n
-    // Per Telegram spec: keys sorted alphabetically, format: key1=value1\nkey2=value2
-    const sortedKeys = Object.keys(params).sort();
-    const dataCheckString = sortedKeys.map(key => `${key}=${params[key]}`).join("\n");
+    // Secret key: HMAC-SHA256("WebAppData", bot_token). Reused for both strategies.
+    const secretKey = crypto.createHmac("sha256", "WebAppData").update(BOT_TOKEN).digest();
 
-    // Create secret key: HMAC-SHA256("WebAppData", bot_token)
-    const secretKey = crypto
-      .createHmac("sha256", "WebAppData")
-      .update(BOT_TOKEN)
-      .digest();
+    const buildDataCheckString = (params: Record<string, string>) =>
+      Object.keys(params).sort().map(k => `${k}=${params[k]}`).join("\n");
 
-    // Calculate signature: HMAC-SHA256(secret_key, data_check_string)
-    const calculatedHash = crypto
-      .createHmac("sha256", secretKey)
-      .update(dataCheckString)
-      .digest("hex");
+    const computeHash = (dcs: string) =>
+      crypto.createHmac("sha256", secretKey).update(dcs).digest("hex");
 
-    // Debug logging for troubleshooting
-    const debug = { receivedHash: hash, calculatedHash, dataCheckString };
+    const dcsDecoded = buildDataCheckString(paramsDecoded);
+    const dcsRaw = buildDataCheckString(paramsRaw);
+    const hashDecoded = computeHash(dcsDecoded);
+    const hashRaw = computeHash(dcsRaw);
 
-    // Compare signatures (constant-time comparison not critical here, but good practice)
-    if (calculatedHash !== hash) {
-      return { valid: false, error: "Invalid initData signature", debug };
+    const matched: "decoded" | "raw" | null =
+      hashDecoded === hash ? "decoded" :
+      hashRaw === hash ? "raw" :
+      null;
+
+    if (!matched) {
+      // Safe diagnostic: log only non-secret fragments so operator can see
+      // why validation fails without exposing the bot token or full user data.
+      console.warn(
+        `[Auth] Signature mismatch. initDataLen=${initData.length} ` +
+        `receivedHash=${hash.slice(0, 8)}.. ` +
+        `computedDecoded=${hashDecoded.slice(0, 8)}.. ` +
+        `computedRaw=${hashRaw.slice(0, 8)}.. ` +
+        `keys=[${Object.keys(paramsDecoded).sort().join(",")}]`
+      );
+      return { valid: false, error: "Invalid initData signature" };
     }
 
-    // Extract user data if needed
-    const userJson = params["user"];
+    // Extract telegramId from decoded user payload
     let telegramId: number | undefined;
+    const userJson = paramsDecoded["user"];
     if (userJson) {
       try {
-        const user = JSON.parse(decodeURIComponent(userJson));
-        telegramId = user.id;
+        const user = JSON.parse(userJson);
+        if (typeof user?.id === "number") telegramId = user.id;
       } catch {
-        // Non-critical: validation passed but couldn't parse user
+        /* validation passed but user payload unparseable — non-fatal */
       }
     }
 
-    return { valid: true, telegramId };
+    return { valid: true, telegramId, matchedStrategy: matched };
   } catch (err: any) {
     return { valid: false, error: `Validation error: ${err.message}` };
   }
