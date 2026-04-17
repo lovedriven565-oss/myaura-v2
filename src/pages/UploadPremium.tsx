@@ -4,6 +4,8 @@ import { useNavigate, Link } from "react-router-dom";
 
 import { Camera, X, Sparkles, Star, Check, Crown, Image as ImageIcon, ShieldCheck, ArrowRight, Wallet, Zap } from "lucide-react";
 
+import { apiFetch } from "../lib/api";
+
 
 
 // Detect Telegram Mini App IDs for delivery
@@ -126,7 +128,7 @@ export default function UploadPremium() {
 
         const url = tgUserId ? `/api/user/balance?telegramId=${tgUserId}` : `/api/user/balance`;
 
-        const res = await fetch(url);
+        const res = await apiFetch(url);
 
         const data = await res.json();
 
@@ -184,7 +186,7 @@ export default function UploadPremium() {
 
     try {
 
-      const res = await fetch("/api/payment/catalog");
+      const res = await apiFetch("/api/payment/catalog");
 
       const data = await res.json();
 
@@ -218,7 +220,7 @@ export default function UploadPremium() {
 
     try {
 
-      const res = await fetch("/api/payment/create-invoice", {
+      const res = await apiFetch("/api/payment/create-invoice", {
 
         method: "POST",
 
@@ -236,7 +238,7 @@ export default function UploadPremium() {
 
           if (status === "paid") {
 
-            fetch(`/api/user/balance?telegramId=${tgUserId}`)
+            apiFetch(`/api/user/balance?telegramId=${tgUserId}`)
 
               .then(r => r.json())
 
@@ -362,13 +364,9 @@ export default function UploadPremium() {
 
     try {
 
-      const tg = (window as any).Telegram?.WebApp;
-
-      const res = await fetch("/api/generate", {
+      const res = await apiFetch("/api/generate", {
 
         method: "POST",
-
-        headers: { "X-Init-Data": tg?.initData || "" },
 
         body: formData,
 

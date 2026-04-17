@@ -3,6 +3,7 @@ import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import cors from "cors";
+import helmet from "helmet";
 import { fileURLToPath } from "url";
 import { dirname } from "path";
 import { initDb } from "./src/server/db.js";
@@ -13,33 +14,78 @@ import { initTelegramBot } from "./src/server/telegram.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+// Allowed CORS origins — add custom origins via CORS_ORIGINS="https://a.com,https://b.com"
+function buildCorsOrigins(): (string | RegExp)[] {
+  const fromEnv = (process.env.CORS_ORIGINS || "")
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean);
+  const defaults = [
+    "https://myaura.by",
+    "https://www.myaura.by",
+    /^https:\/\/t\.me$/,
+    /^https:\/\/web\.telegram\.org$/,
+  ];
+  return [...defaults, ...fromEnv];
+}
+
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = parseInt(process.env.PORT || "3000", 10);
+  const isProd = process.env.NODE_ENV === "production";
 
-  // Middleware
-  app.use(cors());
-  app.use(express.json());
+  // Security headers. CSP is disabled in dev to avoid interfering with Vite HMR;
+  // in production Telegram WebView enforces its own constraints, so we keep
+  // things permissive for images/XHR but lock down classic vectors.
+  app.use(
+    helmet({
+      contentSecurityPolicy: false,
+      crossOriginEmbedderPolicy: false,
+      crossOriginResourcePolicy: { policy: "cross-origin" },
+    })
+  );
 
-  // Initialize DB, Storage and Telegram Bot
+  // CORS: in production restrict to known origins; in dev allow all.
+  app.use(
+    cors({
+      origin: isProd ? buildCorsOrigins() : true,
+      credentials: false,
+    })
+  );
+
+  // JSON body limit — prevents DoS via oversized payloads.
+  app.use(express.json({ limit: "1mb" }));
+
+  // Initialize DB, Storage and Telegram Bot (fail-fast on misconfig)
   initDb();
   startRetentionCron();
-  initTelegramBot();
+  if (process.env.ENABLE_TELEGRAM_BOT !== "false") {
+    initTelegramBot();
+  }
+
+  // Lightweight health endpoint for deploy checks
+  app.get("/healthz", (_req, res) => res.json({ ok: true, ts: Date.now() }));
 
   // API Routes
   app.use("/api", apiRouter);
 
-  // Vite middleware for development
-  if (process.env.NODE_ENV !== "production") {
+  if (!isProd) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
   } else {
-    // Since server.js is in dist/, the client files are in the same directory (__dirname)
+    // server.js is in dist/, client files live alongside it.
     const distPath = __dirname;
-    // Assets are hashed — safe to cache long-term. index.html must never be stale.
+    // Hashed assets: safe to cache long-term (immutable). index.html: never cache.
+    app.use(
+      "/assets",
+      express.static(path.join(distPath, "assets"), {
+        maxAge: "1y",
+        immutable: true,
+      })
+    );
     app.use(express.static(distPath, { index: false }));
     app.get("*", (req, res) => {
       res.set("Cache-Control", "no-cache, no-store, must-revalidate");
@@ -47,18 +93,35 @@ async function startServer() {
     });
   }
 
-  // Global Error Handler (JSON responses)
-  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
-    console.error("Express Error:", err);
-    res.status(err.status || 500).json({
-      error: err.message || "Internal Server Error",
-      code: err.code || "INTERNAL_ERROR",
+  // Global Error Handler (JSON responses). Leaks only the top-level message
+  // in production — stack/details stay in server logs.
+  app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    console.error("Express Error:", err?.stack || err?.message || err);
+    const status = err?.status || 500;
+    res.status(status).json({
+      error: isProd && status >= 500 ? "Internal Server Error" : err?.message || "Internal Server Error",
+      code: err?.code || "INTERNAL_ERROR",
     });
   });
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+  const server = app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server running on http://localhost:${PORT} (NODE_ENV=${process.env.NODE_ENV || "dev"})`);
   });
+
+  // Graceful shutdown — let in-flight requests finish.
+  const shutdown = (signal: string) => {
+    console.log(`Received ${signal}, shutting down gracefully...`);
+    server.close(() => process.exit(0));
+    setTimeout(() => {
+      console.warn("Forced shutdown after 10s grace period.");
+      process.exit(1);
+    }, 10_000).unref();
+  };
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
 }
 
-startServer().catch(console.error);
+startServer().catch(err => {
+  console.error("Fatal startup error:", err);
+  process.exit(1);
+});

@@ -12,6 +12,7 @@ import Processing from "./pages/Processing";
 import Result from "./pages/Result";
 import Privacy from "./pages/Privacy";
 import Terms from "./pages/Terms";
+import { apiFetch } from "./lib/api";
 
 function StateRecoveryWrapper({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
@@ -36,7 +37,7 @@ function StateRecoveryWrapper({ children }: { children: ReactNode }) {
 
     // Validate the active session against the backend
     const statusUrl = uid ? `/api/status/${activeId}?tgUserId=${uid}` : `/api/status/${activeId}`;
-    fetch(statusUrl)
+    apiFetch(statusUrl)
       .then(async r => {
         if (r.status === 403 || r.status === 404) {
           localStorage.removeItem(key);
@@ -91,14 +92,16 @@ function AuthWrapper({ children }: { children: ReactNode }) {
           return;
         }
 
-        // Attempt to upsert the user
+        // Attempt to upsert the user.
+        // NOTE: identity (telegramId) is derived on the server from the
+        // cryptographically signed initData header attached by apiFetch.
+        // Body fields are convenience payload (username, startParam) only.
         const startParam = tg?.initDataUnsafe?.start_param ?? null;
 
-        const res = await fetch("/api/auth", {
+        const res = await apiFetch("/api/auth", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            telegramId: user.id,
             username: user.username,
             firstName: user.first_name,
             lastName: user.last_name,

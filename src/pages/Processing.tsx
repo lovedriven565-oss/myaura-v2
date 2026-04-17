@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { Sparkles, Check, AlertTriangle, Clock } from "lucide-react";
+import { apiFetch } from "../lib/api";
 
 function getActiveGenKey(): string {
   const uid = (window as any).Telegram?.WebApp?.initDataUnsafe?.user?.id;
@@ -72,11 +73,7 @@ export default function Processing() {
     if (pollRef.current) clearInterval(pollRef.current);
     localStorage.removeItem(getActiveGenKey());
     // Fire-and-forget: mark generation as cancelled on backend
-    const tg = (window as any).Telegram?.WebApp;
-    fetch(`/api/cancel/${id}`, {
-      method: "POST",
-      headers: { "X-Init-Data": tg?.initData || "" },
-    }).catch(() => {});
+    apiFetch(`/api/cancel/${id}`, { method: "POST" }).catch(() => {});
     navigate("/", { replace: true });
   };
 
@@ -86,7 +83,7 @@ export default function Processing() {
 
     pollRef.current = setInterval(async () => {
       try {
-        const res = await fetch(statusUrl);
+        const res = await apiFetch(statusUrl);
 
         // 403 = stale/foreign session in localStorage → silently clean up and go home
         if (res.status === 403) {

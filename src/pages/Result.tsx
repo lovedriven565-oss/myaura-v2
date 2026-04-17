@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useParams, Link, useNavigate } from "react-router-dom";
 import { Sparkles, ArrowRight, Send, Wand2, Download, X, Image as ImageIcon, Camera, User, Crown, Gift } from "lucide-react";
+import { apiFetch } from "../lib/api";
 
 interface StatusData {
   status: string;
@@ -38,7 +39,7 @@ export default function Result() {
     const uid = (window as any).Telegram?.WebApp?.initDataUnsafe?.user?.id;
     const key = uid ? `myaura_active_gen_${uid}` : "myaura_active_gen";
     localStorage.removeItem(key);
-    fetch(`/api/status/${id}`)
+    apiFetch(`/api/status/${id}`)
       .then((res) => res.json())
       .then((d: StatusData) => {
         if (d.status === "processing") {

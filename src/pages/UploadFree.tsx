@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { Camera, X, Sparkles, Sun, Wand2, Wallet } from "lucide-react";
+import { apiFetch } from "../lib/api";
 
 // Detect Telegram Mini App IDs for delivery
 function getTelegramIds(): { chatId: string | null; userId: string | null } {
@@ -43,7 +44,7 @@ export default function UploadFree() {
     const fetchBalance = async () => {
       try {
         const url = tgUserId ? `/api/user/balance?telegramId=${tgUserId}` : `/api/user/balance`;
-        const res = await fetch(url);
+        const res = await apiFetch(url);
         const data = await res.json();
         setFreeCredits(data.freeCredits ?? 0);
         setPaidCredits(data.paidCredits ?? 0);
@@ -107,10 +108,8 @@ export default function UploadFree() {
     if (chatId) formData.append("telegramChatId", chatId);
 
     try {
-      const tg = (window as any).Telegram?.WebApp;
-      const res = await fetch("/api/generate", {
+      const res = await apiFetch("/api/generate", {
         method: "POST",
-        headers: { "X-Init-Data": tg?.initData || "" },
         body: formData,
       });
       const data = await res.json();

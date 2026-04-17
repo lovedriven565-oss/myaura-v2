@@ -129,12 +129,10 @@ function initDataAuthMiddleware(req: any, res: any, next: any) {
   const isStrict = process.env.INIT_DATA_STRICT === "true";
 
   if (!initData) {
-    console.log(`[Auth] No initData received. INIT_DATA_STRICT=${isStrict}`);
     // Allow requests without initData for non-Telegram clients (dev/testing)
     if (isStrict) {
       return res.status(401).json({ error: "Missing initData authentication" });
     }
-    console.log("[Auth] No initData, passing through (strict=false)");
     return next();
   }
 
@@ -143,16 +141,9 @@ function initDataAuthMiddleware(req: any, res: any, next: any) {
   if (!validation.valid) {
     console.warn(`[Auth] Invalid initData: ${validation.error}`);
 
-    // Debug logging: show hashes for troubleshooting
-    if (validation.debug) {
-      console.log("[Auth Debug] Received hash:", validation.debug.receivedHash);
-      console.log("[Auth Debug] Calculated hash:", validation.debug.calculatedHash);
-      console.log("[Auth Debug] Data check string:", validation.debug.dataCheckString);
-    }
-
     // BYPASS MODE: if strict=false, log warning but allow request through
     if (!isStrict) {
-      console.warn("[Auth] WARNING: Invalid auth, but passing due to INIT_DATA_STRICT=false");
+      console.warn("[Auth] Invalid auth, passing due to INIT_DATA_STRICT=false");
       return next();
     }
 
@@ -162,9 +153,6 @@ function initDataAuthMiddleware(req: any, res: any, next: any) {
   // Attach validated telegramId to request for downstream use
   if (validation.telegramId) {
     req.telegramId = validation.telegramId;
-    console.log(`[Auth] Valid initData for telegramId: ${validation.telegramId}`);
-  } else {
-    console.log("[Auth] Valid initData but no telegramId extracted");
   }
 
   next();
@@ -286,9 +274,6 @@ apiRouter.post("/generate",
   upload.fields([{ name: "images", maxCount: 15 }]),
   async (req, res, next) => {
     try {
-      // MANDATORY: Log raw request body
-      console.log("RAW REQ BODY:", req.body);
-      
       // SAFETY CHECK: Handle both single file and multiple files
       const imageFiles = (req.files as { [fieldname: string]: Express.Multer.File[] })?.images;
       
@@ -788,17 +773,27 @@ const STORE_PACKAGES = [
 
 // Get user balance (free_credits + paid_credits)
 // --- Authentication Endpoint ---
+// SECURITY: telegramId is sourced from cryptographically validated initData,
+// NEVER from the request body. Body is only consulted when INIT_DATA_STRICT=false
+// (local dev) to allow smoke-testing without a real Telegram WebApp context.
 apiRouter.post("/auth", async (req, res, next) => {
   try {
-    console.log('AUTH PAYLOAD:', req.body);
-    const { telegramId, username, startParam } = req.body;
-    
-    if (!telegramId) {
-      return res.status(400).json({ error: "Telegram ID is required" });
+    const { username, startParam } = req.body || {};
+    const isStrict = process.env.INIT_DATA_STRICT === "true";
+
+    // Primary source: validated initData (set by initDataAuthMiddleware).
+    let tid: number | undefined = (req as any).telegramId;
+
+    // Dev-only fallback: accept body.telegramId ONLY when strict mode is off.
+    if (!tid && !isStrict && req.body?.telegramId) {
+      tid = parseInt(req.body.telegramId, 10);
+    }
+
+    if (!tid || isNaN(tid)) {
+      return res.status(401).json({ error: "Authenticated Telegram user required" });
     }
 
     const db = getDb();
-    const tid = parseInt(telegramId, 10);
     
     // Upsert user: only using telegram_id and username to avoid schema errors
     const { error } = await db
@@ -862,18 +857,28 @@ apiRouter.post("/auth", async (req, res, next) => {
 
 apiRouter.get("/user/balance", async (req, res, next) => {
   try {
-    const telegramId = req.query.telegramId as string;
-    if (!telegramId) return res.json({ freeCredits: 1, paidCredits: 0 });
+    const isStrict = process.env.INIT_DATA_STRICT === "true";
+    let tid: number | undefined = (req as any).telegramId;
+
+    // Dev-only fallback: accept query.telegramId when strict mode is off.
+    if (!tid && !isStrict && req.query?.telegramId) {
+      const parsed = parseInt(req.query.telegramId as string, 10);
+      if (!isNaN(parsed)) tid = parsed;
+    }
+
+    if (!tid) {
+      return res.status(401).json({ error: "Authenticated Telegram user required" });
+    }
 
     const db = getDb();
     const { data: user } = await db
       .from("users")
       .select("free_credits, paid_credits")
-      .eq("telegram_id", telegramId)
+      .eq("telegram_id", tid)
       .single();
 
     if (!user) {
-      return res.json({ freeCredits: 1, paidCredits: 0 });
+      return res.json({ freeCredits: 0, paidCredits: 0 });
     }
 
     res.json({
