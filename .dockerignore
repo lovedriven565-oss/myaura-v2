@@ -41,14 +41,7 @@ README.md
 # Scripts (not needed in container)
 scripts/
 
-# Source files (pre-built in dist/)
-src/
-server.ts
-*.config.ts
-*.config.js
-!ecosystem.config.cjs
-
-tsconfig.json
+# Note: src/, server.ts, config files are NOT ignored — needed for build inside container
 
 # Migrations (run separately if needed)
 migrations/

@@ -1,35 +1,46 @@
 # MyAURA Cloud Run Dockerfile
-# Minimal, production-ready container for Google Cloud Run
+# Multi-stage build: builds the app inside container, no pre-built dist required
 
-FROM node:20-slim
-
-# Set working directory
+# ─── Stage 1: Dependencies ───────────────────────────────────────────────────
+FROM node:20-slim AS deps
 WORKDIR /app
 
-# Copy package files first for better layer caching
 COPY package*.json ./
+RUN npm ci && npm cache clean --force
 
-# Install production dependencies only
-RUN npm ci --only=production && npm cache clean --force
+# ─── Stage 2: Build ──────────────────────────────────────────────────────────
+FROM node:20-slim AS builder
+WORKDIR /app
 
-# Copy built application
-# Note: dist/ must be built before docker build (npm run build)
-COPY dist/ ./dist/
-COPY keys/ ./keys/
+# Copy dependencies from previous stage
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+
+# Build frontend (Vite) and server (esbuild)
+RUN npm run build
+
+# ─── Stage 3: Runtime ──────────────────────────────────────────────────────────
+FROM node:20-slim AS runtime
+WORKDIR /app
+
+# Create non-root user for security
+RUN groupadd -r appgroup && useradd -r -g appgroup appuser
+
+# Copy only necessary files from builder
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package*.json ./
 
 # Cloud Run requires the container to listen on $PORT
-# Default to 3000 for local testing
 ENV PORT=3000
 ENV NODE_ENV=production
 
-# Expose port (Cloud Run ignores this, but good for documentation)
-EXPOSE 3000
+# Switch to non-root user
+USER appuser
 
-# Health check (Cloud Run uses /healthz endpoint)
-# This is informational; Cloud Run's health checking is external
+# Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=2 \
   CMD node -e "require('http').get('http://localhost:' + (process.env.PORT || 3000) + '/healthz', (r) => r.statusCode === 200 ? process.exit(0) : process.exit(1))"
 
 # Run the server
-# Use node directly — no PM2 required for Cloud Run
 CMD ["node", "dist/server.js"]
