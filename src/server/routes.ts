@@ -17,6 +17,38 @@ export const apiRouter = Router();
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const INIT_DATA_MAX_AGE_SECONDS = 86400; // 24 hours — Telegram refreshes initData per session launch
 
+// One-time sanity log on startup: lets the operator spot a missing / mismatched
+// bot token without leaking the full secret. If this prefix does not match the
+// token BotFather shows for the bot that hosts the Mini App, ALL signatures
+// will fail and every user will see AuthError.
+{
+  const prefix = BOT_TOKEN ? `${BOT_TOKEN.slice(0, 6)}...${BOT_TOKEN.slice(-4)}` : "<MISSING>";
+  console.log(`[Auth] Bot token prefix in use: ${prefix} | INIT_DATA_STRICT=${process.env.INIT_DATA_STRICT === "true"}`);
+}
+
+/**
+ * Best-effort parse of the `user` field from a raw initData string.
+ * Used only for non-strict fallback — does NOT imply signature is valid.
+ */
+function extractUserIdFromRawInitData(initData: string): number | undefined {
+  try {
+    const pairs = initData.split("&");
+    for (const pair of pairs) {
+      const eq = pair.indexOf("=");
+      if (eq === -1) continue;
+      const key = pair.substring(0, eq);
+      if (key !== "user") continue;
+      const raw = pair.substring(eq + 1);
+      const decoded = decodeURIComponent(raw);
+      const user = JSON.parse(decoded);
+      return typeof user?.id === "number" ? user.id : undefined;
+    }
+  } catch {
+    /* ignore — caller treats undefined as "no identity" */
+  }
+  return undefined;
+}
+
 /**
  * Validates Telegram Mini App initData using HMAC-SHA256
  * Verifies signature and checks auth_date freshness (anti-replay)
@@ -141,9 +173,20 @@ function initDataAuthMiddleware(req: any, res: any, next: any) {
   if (!validation.valid) {
     console.warn(`[Auth] Invalid initData: ${validation.error}`);
 
-    // BYPASS MODE: if strict=false, log warning but allow request through
+    // BYPASS MODE: if strict=false, log warning but allow request through.
+    // We still best-effort parse user.id from the UNSIGNED payload so
+    // downstream routes (e.g. /api/auth) have identity. This mirrors the
+    // pre-refactor UX for dev / misconfigured-token environments. Identity
+    // is NOT cryptographically verified — strict mode must be enabled in
+    // production to enforce that.
     if (!isStrict) {
-      console.warn("[Auth] Invalid auth, passing due to INIT_DATA_STRICT=false");
+      const rawId = extractUserIdFromRawInitData(initData);
+      if (rawId) {
+        req.telegramId = rawId;
+        console.warn(`[Auth] Invalid signature; trusting UNSIGNED user.id=${rawId} (INIT_DATA_STRICT=false)`);
+      } else {
+        console.warn("[Auth] Invalid signature and no parseable user.id; passing anonymous (INIT_DATA_STRICT=false)");
+      }
       return next();
     }
 
