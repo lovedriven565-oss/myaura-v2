@@ -17,23 +17,52 @@ export class R2Storage implements IStorage {
     const accountId = process.env.R2_ACCOUNT_ID;
     const accessKeyId = process.env.R2_ACCESS_KEY_ID;
     const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY;
-    this.bucketName = process.env.R2_BUCKET_NAME || "myaura-bucket";
+    const bucketName = process.env.R2_BUCKET_NAME;
     this.publicBaseUrl = process.env.R2_PUBLIC_BASE_URL || "";
 
-    if (!accountId || !accessKeyId || !secretAccessKey) {
-      console.warn("R2 credentials missing. Storage will fail.");
+    // Fail-fast: missing creds / bucket would otherwise surface as cryptic
+    // `NoSuchBucket` or signature errors on the first upload. Better to die
+    // at startup with a clear message than silently mis-route to a default.
+    const missing: string[] = [];
+    if (!accountId) missing.push("R2_ACCOUNT_ID");
+    if (!accessKeyId) missing.push("R2_ACCESS_KEY_ID");
+    if (!secretAccessKey) missing.push("R2_SECRET_ACCESS_KEY");
+    if (!bucketName) missing.push("R2_BUCKET_NAME");
+    if (missing.length > 0) {
+      throw new Error(`[R2] Missing required env vars: ${missing.join(", ")}`);
     }
 
-    const endpoint = process.env.R2_S3_ENDPOINT || `https://${accountId}.eu.r2.cloudflarestorage.com`;
+    this.bucketName = bucketName!;
+
+    // R2 jurisdiction is encoded in the endpoint host. A bucket is visible
+    // ONLY through the endpoint of the jurisdiction it was created in:
+    //   default / automatic : https://<acc>.r2.cloudflarestorage.com
+    //   EU                  : https://<acc>.eu.r2.cloudflarestorage.com
+    //   FedRAMP             : https://<acc>.fedramp.r2.cloudflarestorage.com
+    // Default fallback is the automatic jurisdiction (what Cloudflare Dashboard
+    // creates by default). Override with R2_S3_ENDPOINT when the bucket lives
+    // in a specific jurisdiction.
+    const endpoint = process.env.R2_S3_ENDPOINT || `https://${accountId}.r2.cloudflarestorage.com`;
 
     this.s3 = new S3Client({
       region: "auto",
       endpoint,
+      // Cloudflare recommends path-style for R2 S3 API. Virtual-hosted-style
+      // (<bucket>.<endpoint>) works for simple names but has known edge cases
+      // (bucket names with dots, certain SDK versions). Path-style is safer.
+      forcePathStyle: true,
       credentials: {
-        accessKeyId: accessKeyId || "",
-        secretAccessKey: secretAccessKey || "",
+        accessKeyId: accessKeyId!,
+        secretAccessKey: secretAccessKey!,
       },
     });
+
+    // Diagnostic (no secrets): lets operator spot endpoint/jurisdiction
+    // mismatches without reading the env file.
+    console.log(
+      `[R2] endpoint=${endpoint} bucket=${this.bucketName} pathStyle=true ` +
+      `publicBase=${this.publicBaseUrl || "<none>"}`
+    );
   }
 
   async save(fileBuffer: Buffer, originalName: string, type: "original" | "result"): Promise<string> {
