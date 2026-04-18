@@ -844,7 +844,7 @@ export default function UploadPremium() {
 
             <div className="flex items-center justify-between mb-5">
 
-              <h3 className="text-xl font-medium text-white">{canGenerate ? 'Выбрать пакет' : 'Купить генерации'}</h3>
+              <h3 className="text-xl font-medium text-white">Купить генерации</h3>
 
               <button onClick={() => setShowStore(false)} className="text-white/40 hover:text-white transition-colors">
 
@@ -899,8 +899,11 @@ export default function UploadPremium() {
                     </div>
 
                     <div className="text-right">
+
                       <div className="text-[18px] font-bold text-white">{pkg.starsPrice} ⭐️</div>
+
                       <div className="text-[11px] text-white/40 mt-0.5">(~{pkg.priceBYN} BYN / {pkg.priceRUB} RUB)</div>
+
                     </div>
 
                   </div>
@@ -913,39 +916,23 @@ export default function UploadPremium() {
 
 
 
-            {canGenerate ? (
+            <button
 
-              <button
+              onClick={() => handlePurchase(selectedStorePkg)}
 
-                onClick={() => { setConfirmedPackageId(selectedStorePkg); setShowStore(false); }}
+              disabled={!selectedStorePkg}
 
-                className="w-full h-12 bg-gradient-to-r from-[#c084fc] to-[#a855f7] text-white font-medium rounded-xl hover:opacity-90 transition-opacity flex items-center justify-center gap-2"
+              className="w-full h-14 bg-gradient-to-r from-[#c084fc] to-[#a855f7] text-white font-medium rounded-xl hover:opacity-90 transition-opacity flex items-center justify-center gap-2 disabled:opacity-50"
 
-              >
+            >
 
-                <Zap className="w-4 h-4" />
+              <Star className="w-5 h-5" />
 
-                <span>Использовать 1 кредит · {catalog.find(p => p.id === selectedStorePkg)?.generations ?? ''} фото</span>
+              <span>Оплатить {selectedStorePkg ? catalog.find(p => p.id === selectedStorePkg)?.starsPrice + ' ⭐️' : ''}</span>
 
-              </button>
+              <Star className="w-5 h-5" />
 
-            ) : (
-
-              <button
-
-                onClick={() => handlePurchase(selectedStorePkg)}
-
-                className="w-full h-12 bg-gradient-to-r from-[#c084fc] to-[#a855f7] text-white font-medium rounded-xl hover:opacity-90 transition-opacity flex items-center justify-center gap-2"
-
-              >
-
-                <Star className="w-4 h-4" />
-
-                <span>Оплатить {catalog.find(p => p.id === selectedStorePkg)?.starsPrice || ''} ⭐️</span>
-
-              </button>
-
-            )}
+            </button>
 
           </div>
 

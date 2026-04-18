@@ -8,7 +8,7 @@ import { fileURLToPath } from "url";
 import { dirname } from "path";
 import { initDb } from "./src/server/db.js";
 import { startRetentionCron } from "./src/server/retention.js";
-import { apiRouter } from "./src/server/routes.js";
+import { apiRouter, telegramWebhookHandler } from "./src/server/routes.js";
 import { initTelegramBot } from "./src/server/telegram.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -65,6 +65,24 @@ async function startServer() {
 
   // Lightweight health endpoint for deploy checks
   app.get("/healthz", (_req, res) => res.json({ ok: true, ts: Date.now() }));
+
+  // Telegram webhook - mounted DIRECTLY on app (before apiRouter) to avoid auth middleware
+  // Uses express.raw() to get raw body for secret token verification if needed
+  app.post("/api/webhook/telegram", 
+    express.raw({ type: 'application/json', limit: '1mb' }),
+    (req, res, next) => {
+      // Parse raw body back to JSON for the handler
+      try {
+        if (req.body && Buffer.isBuffer(req.body)) {
+          (req as any).body = JSON.parse(req.body.toString());
+        }
+      } catch (e) {
+        console.warn('[Webhook] Failed to parse body as JSON:', e);
+      }
+      next();
+    },
+    telegramWebhookHandler
+  );
 
   // API Routes
   app.use("/api", apiRouter);
