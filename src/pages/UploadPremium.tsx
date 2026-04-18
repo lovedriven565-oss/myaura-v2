@@ -269,110 +269,92 @@ export default function UploadPremium() {
 
 
   const handleMainAction = async () => {
-
-    // Double-click / re-entry guard
-
-    if (loading) return;
-
-
-
-    if (!canGenerate) {
-
-      openStore();
-
-      return;
-
-    }
-
-
-
-    // Credits exist but no package explicitly confirmed yet.
-
-    // Package selection is the ONLY source of generation size — credits are payment substitute only.
-
-    if (!confirmedPackageId) {
-
-      openStore();
-
-      return;
-
-    }
-
-
-
-    if (files.length < 10) {
-
-      setError("Пожалуйста, загрузите от 10 до 15 фото для достижения высокого качества");
-
-      return;
-
-    }
-
-    if (!agreed) {
-
-      setError("Необходимо согласие с условиями");
-
-      return;
-
-    }
-
-
-
-    setLoading(true);
-
-    setError("");
-
-
-
-    const { chatId, userId } = getTelegramIds();
-
-
-
-    if (!userId) {
-
-      setError("Откройте приложение через Telegram для генерации");
-
-      setLoading(false);
-
-      return;
-
-    }
-
-
-
-    const formData = new FormData();
-
-    files.forEach(file => formData.append("images", file));
-
-    // confirmedPackageId is guaranteed non-null here (guarded above)
-
-    formData.append("packageId", confirmedPackageId!);
-
-    formData.append("mode", "premium");
-
-    formData.append("styleIds", JSON.stringify([selectedStyle]));
-
-    formData.append("ageTier", ageTier);
-
-    formData.append("gender", gender);
-
-    formData.append("telegramUserId", userId);
-
-    if (chatId) formData.append("telegramChatId", chatId);
-
-
-
+    // Global try-catch to catch ANY error (sync or async) for debugging
     try {
+      // Double-click / re-entry guard
+      if (loading) return;
 
-      const res = await apiFetch("/api/generate", {
+      if (!canGenerate) {
+        openStore();
+        return;
+      }
 
-        method: "POST",
+      // Credits exist but no package explicitly confirmed yet.
+      if (!confirmedPackageId) {
+        openStore();
+        return;
+      }
 
-        body: formData,
+      if (files.length < 10) {
+        setError("Пожалуйста, загрузите от 10 до 15 фото для достижения высокого качества");
+        return;
+      }
 
+      if (!agreed) {
+        setError("Необходимо согласие с условиями");
+        return;
+      }
+
+      setLoading(true);
+      setError("");
+
+      const { chatId, userId } = getTelegramIds();
+
+      if (!userId) {
+        setError("Откройте приложение через Telegram для генерации");
+        setLoading(false);
+        return;
+      }
+
+      // DEBUG: Log before FormData construction
+      console.log("[GEN DEBUG] Building FormData...", { 
+        filesCount: files.length, 
+        confirmedPackageId, 
+        selectedStyle, 
+        ageTier, 
+        gender, 
+        userId, 
+        chatId 
       });
 
+      const formData = new FormData();
+      
+      // Append files one by one with error handling
+      try {
+        files.forEach((file, idx) => {
+          console.log(`[GEN DEBUG] Appending file ${idx}:`, file.name, file.type, file.size);
+          formData.append("images", file);
+        });
+      } catch (fileErr: any) {
+        console.error("[GEN DEBUG] Error appending files:", fileErr);
+        throw new Error("Failed to append files: " + fileErr.message);
+      }
+
+      // Append other fields
+      formData.append("packageId", confirmedPackageId);
+      formData.append("mode", "premium");
+      
+      // CRITICAL FIX: Ensure styleIds is properly stringified
+      const styleIdsJson = JSON.stringify([selectedStyle]);
+      console.log("[GEN DEBUG] styleIds JSON:", styleIdsJson);
+      formData.append("styleIds", styleIdsJson);
+      
+      formData.append("ageTier", ageTier);
+      formData.append("gender", gender);
+      formData.append("telegramUserId", userId);
+      if (chatId) formData.append("telegramChatId", chatId);
+
+      console.log("[GEN DEBUG] FormData constructed, sending request...");
+
+      const res = await apiFetch("/api/generate", {
+        method: "POST",
+        body: formData,
+      });
+
+      console.log("[GEN DEBUG] Response received:", res.status, res.statusText);
+
       const data = await res.json();
+      console.log("[GEN DEBUG] Response data:", data);
 
       // Handle auth errors (401) from initData validation
       if (res.status === 401) {
@@ -394,7 +376,9 @@ export default function UploadPremium() {
         return;
       }
 
-      if (!res.ok) throw new Error("Произошла ошибка при генерации. Попробуйте ещё раз.");
+      if (!res.ok) {
+        throw new Error(data.error || data.message || "Произошла ошибка при генерации. Попробуйте ещё раз.");
+      }
 
       // Async mode: server returns { id, status: "processing" }
       const _uid = (window as any).Telegram?.WebApp?.initDataUnsafe?.user?.id;
@@ -403,13 +387,14 @@ export default function UploadPremium() {
       navigate(`/processing/${data.id}`);
 
     } catch (err: any) {
-
-      setError(err.message || "Произошла ошибка. Попробуйте ещё раз.");
-
+      // CRITICAL: Log exact error and show alert for debugging
+      console.error("GEN ERROR:", err);
+      console.error("GEN ERROR stack:", err?.stack);
+      alert("GEN ERROR: " + (err?.message || "Unknown error"));
+      
+      setError(err?.message || "Произошла ошибка. Попробуйте ещё раз.");
       setLoading(false);
-
     }
-
   };
 
 
