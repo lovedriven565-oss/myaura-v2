@@ -12,6 +12,12 @@ RUN npm ci && npm cache clean --force
 FROM node:20-slim AS builder
 WORKDIR /app
 
+# Build-time env vars (Vite only includes VITE_ prefixed vars in bundle)
+ARG VITE_FREE_MULTI_REF_V2_ENABLED
+ARG VITE_BOT_USERNAME
+ENV VITE_FREE_MULTI_REF_V2_ENABLED=${VITE_FREE_MULTI_REF_V2_ENABLED:-true}
+ENV VITE_BOT_USERNAME=${VITE_BOT_USERNAME:-myaura_bot}
+
 # Copy dependencies from previous stage
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .

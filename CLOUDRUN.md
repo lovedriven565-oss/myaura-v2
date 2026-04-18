@@ -45,6 +45,20 @@ JUDGE_MODEL_ID=gemini-3.1-flash-image-preview
 QUALITY_GATE_ENABLED=true
 ```
 
+### Build-Time Variables (Critical for Frontend)
+
+These must be passed during **build time** (not runtime) because Vite bundles them into the frontend:
+
+```bash
+# Free tier multi-photo feature (allows 5 photos instead of 1)
+VITE_FREE_MULTI_REF_V2_ENABLED=true
+
+# Bot username for referral links
+VITE_BOT_USERNAME=myaura_bot
+```
+
+**⚠️ IMPORTANT:** If `VITE_FREE_MULTI_REF_V2_ENABLED` is not set during build, free tier will only allow 1 photo instead of 5!
+
 ## 2. Build and Deploy
 
 ### Option A: Local Build + Push (Recommended for first deploy)

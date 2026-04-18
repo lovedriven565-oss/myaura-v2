@@ -1,0 +1,112 @@
+# Cloud Build configuration for MyAURA
+# Builds the container with proper build-time env vars for Vite
+
+steps:
+  # Build the container with build args for Vite env vars
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '--tag'
+      - 'gcr.io/$PROJECT_ID/myaura:$COMMIT_SHA'
+      - '--tag'
+      - 'gcr.io/$PROJECT_ID/myaura:latest'
+      - '--build-arg'
+      - 'VITE_FREE_MULTI_REF_V2_ENABLED=${_VITE_FREE_MULTI_REF_V2_ENABLED}'
+      - '--build-arg'
+      - 'VITE_BOT_USERNAME=${_VITE_BOT_USERNAME}'
+      - '.'
+
+  # Push the container image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'gcr.io/$PROJECT_ID/myaura:$COMMIT_SHA'
+
+  # Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'myaura'
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/myaura:$COMMIT_SHA'
+      - '--region'
+      - 'us-central1'
+      - '--platform'
+      - 'managed'
+      - '--allow-unauthenticated'
+      - '--memory'
+      - '2Gi'
+      - '--cpu'
+      - '2'
+      - '--concurrency'
+      - '80'
+      - '--max-instances'
+      - '10'
+      - '--min-instances'
+      - '1'
+      - '--timeout'
+      - '300'
+      - '--set-env-vars'
+      - 'NODE_ENV=production'
+      - '--set-env-vars'
+      - 'SUPABASE_URL=${_SUPABASE_URL}'
+      - '--set-env-vars'
+      - 'SUPABASE_ANON_KEY=${_SUPABASE_ANON_KEY}'
+      - '--set-env-vars'
+      - 'SUPABASE_SERVICE_ROLE_KEY=${_SUPABASE_SERVICE_ROLE_KEY}'
+      - '--set-env-vars'
+      - 'GOOGLE_CLOUD_PROJECT=${_GOOGLE_CLOUD_PROJECT}'
+      - '--set-env-vars'
+      - 'VERTEX_LOCATION=${_VERTEX_LOCATION}'
+      - '--set-env-vars'
+      - 'VERTEX_AI_MODEL_FREE=${_VERTEX_AI_MODEL_FREE}'
+      - '--set-env-vars'
+      - 'VERTEX_AI_MODEL_PREMIUM=${_VERTEX_AI_MODEL_PREMIUM}'
+      - '--set-env-vars'
+      - 'R2_ACCOUNT_ID=${_R2_ACCOUNT_ID}'
+      - '--set-env-vars'
+      - 'R2_ACCESS_KEY_ID=${_R2_ACCESS_KEY_ID}'
+      - '--set-env-vars'
+      - 'R2_SECRET_ACCESS_KEY=${_R2_SECRET_ACCESS_KEY}'
+      - '--set-env-vars'
+      - 'R2_BUCKET_NAME=${_R2_BUCKET_NAME}'
+      - '--set-env-vars'
+      - 'R2_PUBLIC_BASE_URL=${_R2_PUBLIC_BASE_URL}'
+      - '--set-env-vars'
+      - 'BOT_TOKEN=${_BOT_TOKEN}'
+      - '--set-env-vars'
+      - 'WEBHOOK_DOMAIN=${_WEBHOOK_DOMAIN}'
+      - '--set-env-vars'
+      - 'ENABLE_TELEGRAM_BOT=${_ENABLE_TELEGRAM_BOT}'
+      - '--set-env-vars'
+      - 'FREE_MULTI_REF_V2_ENABLED=${_FREE_MULTI_REF_V2_ENABLED}'
+      - '--set-env-vars'
+      - 'JUDGE_MODEL_ID=${_JUDGE_MODEL_ID}'
+      - '--set-env-vars'
+      - 'QUALITY_GATE_ENABLED=${_QUALITY_GATE_ENABLED}'
+
+# Store images in Google Container Registry
+images:
+  - 'gcr.io/$PROJECT_ID/myaura:$COMMIT_SHA'
+  - 'gcr.io/$PROJECT_ID/myaura:latest'
+
+# Substitutions (set these in Cloud Build trigger or command line)
+substitutions:
+  _VITE_FREE_MULTI_REF_V2_ENABLED: 'true'  # CRITICAL: enables 5 photos for free tier
+  _VITE_BOT_USERNAME: 'myaura_bot'
+  _FREE_MULTI_REF_V2_ENABLED: 'true'  # Server-side counterpart
+  _VERTEX_LOCATION: 'global'
+  _VERTEX_AI_MODEL_FREE: 'gemini-3.1-flash-image-preview'
+  _VERTEX_AI_MODEL_PREMIUM: 'gemini-3-pro-image-preview'
+  _JUDGE_MODEL_ID: 'gemini-3.1-flash-image-preview'
+  _QUALITY_GATE_ENABLED: 'true'
+  _ENABLE_TELEGRAM_BOT: 'true'
+
+# Timeout for the build
+options:
+  machineType: 'E2_HIGHCPU_8'
+  logging: 'CLOUD_LOGGING_ONLY'
+
+timeout: '1200s'
