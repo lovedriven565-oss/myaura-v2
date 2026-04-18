@@ -202,15 +202,8 @@ export function initTelegramBot() {
     }
   });
 
-  bot.launch().then(() => {
-    console.log("Telegram bot started.");
-  }).catch((err) => {
-    console.error("Failed to start Telegram bot:", err);
-  });
-
-  // Enable graceful stop
-  process.once("SIGINT", () => bot.stop("SIGINT"));
-  process.once("SIGTERM", () => bot.stop("SIGTERM"));
+  // Webhook mode: no bot.launch() polling — messages handled via POST /api/webhook/telegram
+  console.log("Telegram bot initialized (webhook mode, no polling).");
 }
 
 /**
