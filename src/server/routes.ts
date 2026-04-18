@@ -9,6 +9,7 @@ import { validatePackageInput, buildStyleSchedule, buildStyleScheduleWithCount, 
 import { deliverTelegramPhoto, deliverTelegramResults, notifyReferralAwarded } from "./telegram.js";
 import { selectBestReferencePhotos } from "./inputCuration.js";
 import { evaluateGeneratedPhoto, clearRerollTracking } from "./qualityGate.js";
+import { enqueueGeneration, refundCredit, markCreditConsumed, checkRateLimit } from "./dbQueue.js";
 import crypto from "crypto";
 
 export const apiRouter = Router();
@@ -281,35 +282,23 @@ async function tryAwardReferral(inviteeId: number, generationId: string): Promis
   }
 }
 
-// ─── Per-user Generation Rate Limiter ────────────────────────────────────────
-const _genRateMap = new Map<number, number>(); // userId → last generation timestamp (ms)
+// ─── Per-user Generation Rate Limiter (CloudRun-safe via PostgreSQL) ─────────
 const GENERATION_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes per user
 
-function generationRateLimitMiddleware(req: any, res: any, next: any) {
+async function generationRateLimitMiddleware(req: any, res: any, next: any) {
   const telegramUserId = parseInt(req.body?.telegramUserId, 10);
   if (!telegramUserId || isNaN(telegramUserId)) return next();
 
-  const now = Date.now();
-  const lastGen = _genRateMap.get(telegramUserId);
+  const cooldownSec = Math.ceil(GENERATION_COOLDOWN_MS / 1000);
+  const waitSec = await checkRateLimit(telegramUserId, cooldownSec);
 
-  if (lastGen && (now - lastGen) < GENERATION_COOLDOWN_MS) {
-    const waitSec = Math.ceil((GENERATION_COOLDOWN_MS - (now - lastGen)) / 1000);
+  if (waitSec > 0) {
     console.warn(`[RateLimit] userId=${telegramUserId} blocked, retry in ${waitSec}s`);
     return res.status(429).json({
       error: `Слишком много запросов. Подождите ${waitSec} секунд.`,
       code: "RATE_LIMITED",
       retryAfter: waitSec
     });
-  }
-
-  _genRateMap.set(telegramUserId, now);
-
-  // Evict stale entries to prevent memory leak
-  if (_genRateMap.size > 5000) {
-    const cutoff = now - GENERATION_COOLDOWN_MS * 5;
-    for (const [uid, ts] of _genRateMap) {
-      if (ts < cutoff) _genRateMap.delete(uid);
-    }
   }
 
   next();
@@ -336,7 +325,7 @@ function isValidImageBuffer(buf: Buffer, declaredMime: string): boolean {
 
 // 1. Upload & Start Generation (Supports single file for 'free' and multiple for 'premium')
 apiRouter.post("/generate",
-  generationRateLimitMiddleware,
+  (req, res, next) => generationRateLimitMiddleware(req, res, next),
   upload.fields([{ name: "images", maxCount: 15 }]),
   async (req, res, next) => {
     try {
@@ -500,6 +489,10 @@ apiRouter.post("/generate",
         console.error("Credit consumption error:", consumeError);
         return res.status(500).json({ error: "Failed to consume credit", code: "CREDIT_ERROR" });
       }
+
+      // Record that credit was consumed (for potential refund if generation fails)
+      await markCreditConsumed(id, creditType);
+      (req as any).creditType = creditType;  // Store for error handling
 
       console.log(`[${id}] Consumed 1 ${creditType} credit (mode=${mode}) from user ${telegramUserId}`);
     }
@@ -699,12 +692,43 @@ apiRouter.post("/generate",
 
       // Final Telegram delivery: only for free/preview (1 image).
       // Premium images are already delivered progressively per-image above.
+      let deliveryFailed = false;
       if (completedCount > 0 && mode !== 'premium') {
         const targetChatId = telegramChatId || telegramUserId;
         if (targetChatId) {
-          deliverTelegramResults(targetChatId, successPaths).catch(err => {
-            console.error(`Final delivery failed for generation ${id}:`, err);
-          });
+          try {
+            await deliverTelegramResults(targetChatId, successPaths);
+            console.log(`[${id}] Telegram delivery successful`);
+          } catch (deliveryErr: any) {
+            deliveryFailed = true;
+            console.error(`[${id}] Telegram delivery failed:`, deliveryErr);
+            // Refund credit if delivery failed - user didn't receive their photo
+            if ((req as any).creditType && telegramUserId) {
+              const refunded = await refundCredit(
+                telegramUserId,
+                (req as any).creditType,
+                id,
+                `Telegram delivery failed: ${deliveryErr.message}`
+              );
+              if (refunded) {
+                console.log(`[${id}] Credit refunded due to Telegram delivery failure`);
+              }
+            }
+          }
+        }
+      }
+
+      // REFUND LOGIC: If generation completely failed (0 completed), refund credit
+      const creditType = (req as any).creditType;
+      if (completedCount === 0 && creditType && telegramUserId && !deliveryFailed) {
+        const refunded = await refundCredit(
+          telegramUserId,
+          creditType,
+          id,
+          `Generation failed: ${finalErrorMsg || 'All images failed to generate'}`
+        );
+        if (refunded) {
+          console.log(`[${id}] Credit refunded due to complete generation failure`);
         }
       }
 
@@ -714,6 +738,24 @@ apiRouter.post("/generate",
         .from("generations")
         .update({ status: "failed", error_message: genError.message })
         .eq("id", id);
+      
+      // REFUND: Critical error during generation - always refund
+      const creditType = (req as any).creditType;
+      if (creditType && telegramUserId) {
+        try {
+          const refunded = await refundCredit(
+            telegramUserId,
+            creditType,
+            id,
+            `Critical generation error: ${genError.message}`
+          );
+          if (refunded) {
+            console.log(`[${id}] Credit refunded due to critical error`);
+          }
+        } catch (refundErr: any) {
+          console.error(`[${id}] Failed to refund after critical error:`, refundErr);
+        }
+      }
     }
   } catch (error) {
     next(error);

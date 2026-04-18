@@ -6,11 +6,11 @@ export interface IGenerationProvider {
   generateImage(originalImageBase64: string, mimeType: string, prompt: string, mode?: 'preview' | 'premium', additionalImages?: string[]): Promise<string>;
 }
 
-// Dual-model segmentation:
-// FREE tier  → gemini-3.1-flash-image-preview (Nano Banana 2), fallback: gemini-2.5-flash-image
-// PREMIUM tier → gemini-3-pro-image-preview  (Nano Banana Pro), fallback: gemini-3.1-flash-image-preview
+// MyAURA 2-Model Stack:
+// - gemini-3.1-flash-image-preview (FREE tier + PRO fallback + QualityGate judge)
+// - gemini-3-pro-image-preview (PRO tier primary)
 const FREE_MODEL_PRIMARY   = process.env.VERTEX_AI_MODEL_FREE || process.env.FREE_MODEL_ID || "gemini-3.1-flash-image-preview";
-const FREE_MODEL_FALLBACK  = process.env.FREE_MODEL_FALLBACK_ID || "gemini-2.5-flash-image";
+const FREE_MODEL_FALLBACK  = process.env.FREE_MODEL_FALLBACK_ID || "gemini-3.1-flash-image-preview";
 const PRO_MODEL_PRIMARY    = process.env.VERTEX_AI_MODEL_PREMIUM || process.env.PREMIUM_MODEL_ID || "gemini-3-pro-image-preview";
 const PRO_MODEL_FALLBACK   = process.env.PREMIUM_MODEL_FALLBACK_ID || "gemini-3.1-flash-image-preview";
 
@@ -19,11 +19,10 @@ const MAX_RETRIES = 2;
 const BASE_DELAY_MS = 15000; // 15s base
 const MAX_DELAY_MS = 60000;  // cap at 60s
 
-// Per-model call timeout: Pro model can take up to 120s, Flash up to 60s
+// Per-model call timeout: Pro model can take up to 120s, Flash up to 90s
 const MODEL_CALL_TIMEOUT_MS: Record<string, number> = {
   ["gemini-3-pro-image-preview"]:    120_000,
   ["gemini-3.1-flash-image-preview"]: 90_000,
-  ["gemini-2.5-flash-image"]:         60_000,
 };
 const DEFAULT_CALL_TIMEOUT_MS = 90_000;
 

@@ -1,16 +1,39 @@
 /**
  * Quality Gate Module for Post-Generation Evaluation
  * 
- * Provides both a Vertex AI multimodal judge (when available)
- * and a rule-based fallback evaluator.
+ * MyAURA 2-Model Stack:
+ * - gemini-3.1-flash-image-preview (FREE tier + QualityGate judge)
+ * - gemini-3-pro-image-preview (PRO tier)
+ * 
+ * Design principles:
+ * 1. Reuse Vertex AI key pool for consistency with generation path
+ * 2. Quality threshold optimized for portrait photography (identity preservation priority)
+ * 3. Fast failure with informative logging — never block generation flow
  */
+
+import { GoogleGenAI } from "@google/genai";
+import fs from "fs";
+import path from "path";
+
+// ─── Configuration ────────────────────────────────────────────────────────
+
+// QualityGate uses the same model as FREE tier generation for consistency
+const JUDGE_MODEL = process.env.JUDGE_MODEL_ID || "gemini-3.1-flash-image-preview";
+
+const PASS_THRESHOLD = parseInt(process.env.QUALITY_GATE_PASS_THRESHOLD || "60", 10);
+const REROLL_ENABLED = process.env.QUALITY_GATE_REROLL_ENABLED !== "false";
+const MAX_REROLLS_PER_IMAGE = parseInt(process.env.QUALITY_GATE_MAX_REROLLS || "1", 10);
+const JUDGE_TIMEOUT_MS = parseInt(process.env.QUALITY_GATE_TIMEOUT_MS || "15000", 10); // 15s max for judge
+
+// ─── Types ───────────────────────────────────────────────────────────────────
 
 export interface QualityScore {
   likenessScore: number;      // 0-100: does the face match references?
-  ageDriftScore: number;      // 0-100: 100 = no age change, 0 = severe aging/de-aging
-  skinRealismScore: number;   // 0-100: 100 = natural skin, 0 = plastic/wax
+  ageDriftScore: number;      // 0-100: 100 = no age change
+  skinRealismScore: number;   // 0-100: 100 = natural skin
   eyeConsistencyScore: number;// 0-100: eye color and detail preserved
   premiumLookScore: number;   // 0-100: overall premium quality feel
+  expressionScore: number;    // 0-100: calm, confident vs sad/tense
   overallPass: boolean;
   overallScore: number;
   rejectReasons: string[];
@@ -19,168 +42,347 @@ export interface QualityScore {
 export interface QualityGateResult {
   score: QualityScore;
   shouldReroll: boolean;
-  evaluationMethod: "multimodal_judge" | "rule_based_fallback";
+  evaluationMethod: "multimodal_judge" | "rule_based_fallback" | "skipped";
   evaluationTimeMs: number;
+  judgeModel?: string;
 }
 
-// Configurable thresholds
-const PASS_THRESHOLD = parseInt(process.env.QUALITY_GATE_PASS_THRESHOLD || "55");
-const REROLL_ENABLED = process.env.QUALITY_GATE_REROLL_ENABLED !== "false"; // default true
-const MAX_REROLLS_PER_IMAGE = parseInt(process.env.QUALITY_GATE_MAX_REROLLS || "1");
+// ─── Key Pool (mirrors ai.ts for consistency) ───────────────────────────────
 
-// Track reroll counts per generation
+const VERTEX_LOCATION = process.env.VERTEX_LOCATION || 'global';
+
+interface KeySlot {
+  keyPath: string;
+  projectId: string;
+  keyHint: string;
+  cooldownUntil: number;
+}
+
+const KEY_COOLDOWN_MS = 60_000;
+
+function buildKeyPool(): KeySlot[] {
+  const keysDir = path.resolve(process.cwd(), 'keys');
+  if (!fs.existsSync(keysDir)) {
+    return [{ keyPath: "", projectId: "", keyHint: "adc", cooldownUntil: 0 }];
+  }
+
+  const jsonFiles = fs.readdirSync(keysDir).filter(f => f.endsWith('.json') && f !== 'dummy.json');
+  if (jsonFiles.length === 0) {
+    return [{ keyPath: "", projectId: "", keyHint: "adc", cooldownUntil: 0 }];
+  }
+
+  return jsonFiles.map(filename => {
+    const keyPath = path.join(keysDir, filename);
+    const keyContent = JSON.parse(fs.readFileSync(keyPath, 'utf-8'));
+    const projectId = keyContent.project_id || 'unknown';
+    return { keyPath, projectId, keyHint: filename.slice(-6), cooldownUntil: 0 };
+  });
+}
+
+function createEphemeralClient(slot: KeySlot, signal: AbortSignal): GoogleGenAI {
+  const opts: Record<string, any> = { httpOptions: { signal } };
+
+  if (slot.keyPath) {
+    const prev = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = slot.keyPath;
+    Object.assign(opts, { vertexai: true, project: slot.projectId, location: VERTEX_LOCATION });
+    const client = new GoogleGenAI(opts);
+    if (prev !== undefined) process.env.GOOGLE_APPLICATION_CREDENTIALS = prev;
+    else delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    return client;
+  }
+
+  return new GoogleGenAI(opts);
+}
+
+const keyPool: KeySlot[] = buildKeyPool();
+let keyIndex = 0;
+
+async function getNextAvailableKey(): Promise<KeySlot | null> {
+  const now = Date.now();
+  const total = keyPool.length;
+
+  for (let i = 0; i < total; i++) {
+    const slot = keyPool[(keyIndex + i) % total];
+    if (slot.cooldownUntil <= now) {
+      keyIndex = ((keyIndex + i) + 1) % total;
+      return slot;
+    }
+  }
+
+  // All keys cooling — don't wait, fallback immediately for judge
+  return null;
+}
+
+function markKeyCooldown(slot: KeySlot): void {
+  slot.cooldownUntil = Date.now() + KEY_COOLDOWN_MS;
+}
+
+// ─── Reroll Tracking ─────────────────────────────────────────────────────────
+
 const rerollCounts = new Map<string, number>();
 
+export function clearRerollTracking(generationId: string) {
+  for (const key of rerollCounts.keys()) {
+    if (key.startsWith(generationId)) rerollCounts.delete(key);
+  }
+}
+
+// ─── Multimodal Judge ────────────────────────────────────────────────────────
+
 /**
- * Attempt multimodal evaluation using Vertex AI / Gemini.
- * Returns null if unavailable or fails — caller should use fallback.
+ * Professional portrait photography evaluation using multimodal LLM.
+ * 
+ * Uses gemini-3.1-flash-image-preview (same as FREE tier generation).
  */
 async function multimodalJudge(
   referenceBase64: string,
   generatedBase64: string,
   mimeType: string,
   style: string
-): Promise<QualityScore | null> {
+): Promise<{ score: QualityScore; model: string } | null> {
+  const slot = await getNextAvailableKey();
+  if (!slot) {
+    console.warn("[QualityGate] No available keys for judge — using fallback");
+    return null;
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), JUDGE_TIMEOUT_MS);
+
   try {
-    // Quality judge uses Vertex AI via ADC (same service-account flow as generation).
-    const project = process.env.GOOGLE_CLOUD_PROJECT;
-    const location = process.env.VERTEX_LOCATION || 'global';
-    const judgeModel = process.env.JUDGE_MODEL_ID || "gemini-2.0-flash";
-    if (!project) {
-      console.warn("[QualityGate] No GOOGLE_CLOUD_PROJECT — skipping multimodal judge");
-      return null;
-    }
+    const client = createEphemeralClient(slot, controller.signal);
 
-    const { GoogleGenAI } = await import("@google/genai");
-    const ai = new GoogleGenAI({ vertexai: true, project, location } as any);
+    const evaluationPrompt = `You are an expert portrait photography quality judge specializing in AI-generated identity preservation.
 
-    const evaluationPrompt = `You are a professional portrait photography quality judge specializing in identity preservation.
-Compare the REFERENCE photo (first image) with the GENERATED photo (second image).
-The generated photo should be in "${style}" style.
+TASK: Compare the REFERENCE photo (first image) with the AI-GENERATED photo (second image).
+The generated photo should be in "${style}" professional portrait style.
 
-Rate these aspects from 0-100:
-- likeness: Does the generated face match the SPECIFIC REFERENCE PERSON exactly? Penalize heavily if the face has drifted toward a generic attractive/model archetype even if it looks good. (facial structure, features, proportions must match)
-- ageDrift: 100 = same age appearance as reference, 0 = significant aging or de-aging caused by style lighting
-- skinRealism: 100 = natural realistic skin with visible pores and micro-texture, 0 = plastic/wax/over-smoothed
-- eyeConsistency: 100 = same eye shape, color and detail as reference, 0 = wrong color or broken eyes
-- premiumLook: 100 = magazine-quality premium result, 0 = amateur/low quality
-- expressionScore: 100 = calm, confident, approachable, 0 = sad, tense, tired, stern, or harsh under-eye shadows
+Evaluate these dimensions (score 0-100 for each):
 
-Respond ONLY with a JSON object, no markdown, no explanation:
-{"likeness":N,"ageDrift":N,"skinRealism":N,"eyeConsistency":N,"premiumLook":N,"expressionScore":N}`;
+1. LIKENESS (0-100): Does the generated face match the SPECIFIC PERSON in the reference?
+   - 100 = identical facial structure, bone structure, features, proportions
+   - 50 = somewhat similar but noticeably different person
+   - 0 = completely different person or generic model face
+   - PENALIZE heavily if face drifted toward generic attractive archetype
 
-    const response = await ai.models.generateContent({
-      model: judgeModel,
+2. AGE_DRIFT (0-100): Is apparent age consistent with reference?
+   - 100 = exactly same age appearance
+   - 50 = noticeably younger or older
+   - 0 = severe aging/de-aging from style lighting
+
+3. SKIN_REALISM (0-100): Is skin texture natural and realistic?
+   - 100 = visible pores, micro-texture, natural imperfections
+   - 50 = slightly smoothed but still plausible
+   - 0 = plastic/wax/mannequin effect, over-retouched
+
+4. EYE_CONSISTENCY (0-100): Are eyes natural and consistent with reference?
+   - 100 = correct eye shape, color, catchlights, no distortion
+   - 50 = slight color/shape mismatch
+   - 0 = wrong color, distorted, or broken anatomy
+
+5. PREMIUM_LOOK (0-100): Overall professional photography quality
+   - 100 = magazine-quality, expensive lighting, art direction
+   - 50 = decent but amateur-looking
+   - 0 = low quality, artifacts, poor composition
+
+6. EXPRESSION (0-100): Facial expression quality
+   - 100 = calm, confident, approachable, professional
+   - 50 = neutral
+   - 0 = sad, tense, tired, stern, harsh under-eye shadows
+
+Respond ONLY with a JSON object containing exactly these fields:
+{
+  "likeness": <number 0-100>,
+  "ageDrift": <number 0-100>,
+  "skinRealism": <number 0-100>,
+  "eyeConsistency": <number 0-100>,
+  "premiumLook": <number 0-100>,
+  "expression": <number 0-100>,
+  "failureTags": ["tag1", "tag2"]
+}
+
+Use failure tags from this list only: identity_drift, age_drift, plastic_skin, eye_distortion, weak_style_match, low_premium_feel, sad_expression`;
+
+    const response = await client.models.generateContent({
+      model: JUDGE_MODEL,
       contents: [
         { inlineData: { data: referenceBase64, mimeType } },
         { inlineData: { data: generatedBase64, mimeType } },
         { text: evaluationPrompt }
       ],
+      config: {
+        temperature: 0.1, // Low temperature for consistent evaluation
+        topP: 0.95,
+        maxOutputTokens: 1024,
+      } as any,
     });
 
+    clearTimeout(timeoutId);
+
     const text = response?.candidates?.[0]?.content?.parts?.[0]?.text || "";
-    // Extract JSON from response (handle potential markdown wrapping)
-    const jsonMatch = text.match(/\{[^}]+\}/);
-    if (!jsonMatch) return null;
+    
+    // Robust JSON extraction — handle markdown code blocks
+    let jsonMatch = text.match(/```json\s*\n?([\s\S]*?)\n?```/);
+    if (!jsonMatch) jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      console.warn("[QualityGate] No JSON found in judge response");
+      return null;
+    }
 
-    const parsed = JSON.parse(jsonMatch[0]);
-    const rejectReasons: string[] = [];
+    const parsed = JSON.parse(jsonMatch[1] || jsonMatch[0]);
 
-    if (parsed.likeness < 55) rejectReasons.push("low_likeness");
-    if (parsed.ageDrift < 50) rejectReasons.push("age_drift_detected");
-    if (parsed.skinRealism < 50) rejectReasons.push("unrealistic_skin");
-    if (parsed.eyeConsistency < 50) rejectReasons.push("eye_inconsistency");
-    if (parsed.premiumLook < 40) rejectReasons.push("low_premium_quality");
-    if (parsed.expressionScore < 40) rejectReasons.push("sad_or_tense_expression");
-
-    const overallScore = Math.round(
-      (parsed.likeness * 0.35) +      // identity is the product — highest weight
-      (parsed.ageDrift * 0.15) +
-      (parsed.skinRealism * 0.15) +
-      (parsed.eyeConsistency * 0.10) +
-      (parsed.premiumLook * 0.10) +   // style quality is secondary to identity
-      (parsed.expressionScore * 0.15)
+    // Build rejection reasons from failure tags and thresholds
+    const rejectReasons: string[] = (parsed.failureTags || []).filter((t: string) => 
+      ["identity_drift", "age_drift", "plastic_skin", "eye_distortion", 
+       "weak_style_match", "low_premium_feel", "sad_expression"].includes(t)
     );
 
-    return {
-      likenessScore: parsed.likeness,
-      ageDriftScore: parsed.ageDrift,
-      skinRealismScore: parsed.skinRealism,
-      eyeConsistencyScore: parsed.eyeConsistency,
-      premiumLookScore: parsed.premiumLook,
-      overallPass: overallScore >= PASS_THRESHOLD,
+    // Additional threshold-based rejections
+    if ((parsed.likeness ?? 50) < 55) rejectReasons.push("low_likeness");
+    if ((parsed.ageDrift ?? 50) < 50) rejectReasons.push("age_drift_detected");
+    if ((parsed.skinRealism ?? 50) < 50) rejectReasons.push("unrealistic_skin");
+    if ((parsed.eyeConsistency ?? 50) < 50) rejectReasons.push("eye_inconsistency");
+    if ((parsed.premiumLook ?? 50) < 45) rejectReasons.push("low_premium_quality");
+    if ((parsed.expression ?? 50) < 45) rejectReasons.push("poor_expression");
+
+    // Weighted overall score — likeness is king for identity preservation
+    const overallScore = Math.round(
+      (parsed.likeness * 0.40) +      // Identity is the product
+      (parsed.ageDrift * 0.15) +      // Age consistency matters
+      (parsed.skinRealism * 0.15) +   // Realism quality
+      (parsed.eyeConsistency * 0.10) +// Detail quality
+      (parsed.premiumLook * 0.10) +   // Aesthetic quality
+      (parsed.expression * 0.10)      // Emotional quality
+    );
+
+    const score: QualityScore = {
+      likenessScore: parsed.likeness ?? 50,
+      ageDriftScore: parsed.ageDrift ?? 50,
+      skinRealismScore: parsed.skinRealism ?? 50,
+      eyeConsistencyScore: parsed.eyeConsistency ?? 50,
+      premiumLookScore: parsed.premiumLook ?? 50,
+      expressionScore: parsed.expression ?? 50,
+      overallPass: overallScore >= PASS_THRESHOLD && rejectReasons.length === 0,
       overallScore,
-      rejectReasons,
+      rejectReasons: [...new Set(rejectReasons)], // dedupe
     };
+
+    return { score, model: JUDGE_MODEL };
+
   } catch (err: any) {
-    console.warn(`[QualityGate] Multimodal judge failed: ${err.message}`);
+    clearTimeout(timeoutId);
+    
+    if (err?.name === 'AbortError' || controller.signal.aborted) {
+      console.warn(`[QualityGate] Judge timeout after ${JUDGE_TIMEOUT_MS}ms`);
+    } else {
+      const errMsg = err?.message || String(err);
+      console.warn(`[QualityGate] Judge error: ${errMsg.slice(0, 200)}`);
+      
+      // Handle specific model errors
+      if (errMsg.includes("404") || errMsg.includes("not found") || errMsg.includes("invalid model")) {
+        console.error(`[QualityGate] CRITICAL: Model "${JUDGE_MODEL}" not found or invalid.`);
+        console.error(`[QualityGate] Ensure JUDGE_MODEL_ID is set to gemini-3.1-flash-image-preview or gemini-3-pro-image-preview`);
+      }
+      
+      // Rate limiting
+      if (err?.status === 429 || errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED")) {
+        markKeyCooldown(slot);
+      }
+    }
+    
     return null;
   }
 }
 
+// ─── Rule-Based Fallback ─────────────────────────────────────────────────────
+
 /**
- * Rule-based fallback evaluator.
- * Uses buffer heuristics when multimodal judge is unavailable.
- * This is intentionally generous — it catches only obvious failures.
+ * Fast rule-based evaluation when multimodal judge unavailable.
+ * Catches obvious failures (corrupted output, extreme artifacts).
  */
 function ruleBasedFallback(generatedBuffer: Buffer, style: string): QualityScore {
   const rejectReasons: string[] = [];
-
-  // Check if output is too small (likely generation failure)
   const sizeKB = generatedBuffer.length / 1024;
+
+  // Size-based heuristics
   let premiumLookScore = 70;
   let skinRealismScore = 70;
+  let likenessScore = 70;
 
   if (sizeKB < 20) {
     rejectReasons.push("output_too_small");
-    premiumLookScore = 10;
+    premiumLookScore = 15;
+    likenessScore = 30; // Likely corrupted
   } else if (sizeKB < 50) {
     rejectReasons.push("output_low_quality");
-    premiumLookScore = 30;
-  } else if (sizeKB > 200) {
-    premiumLookScore = 80; // larger output = more detail = better
+    premiumLookScore = 35;
+  } else if (sizeKB > 300) {
+    premiumLookScore = 85; // Large file = more detail
   }
 
-  // Entropy check on output
-  const sample = generatedBuffer.slice(
-    Math.min(2048, generatedBuffer.length),
-    Math.min(10240, generatedBuffer.length)
-  );
+  // Entropy check for "naturalness" of image data
+  const sampleSize = Math.min(8192, generatedBuffer.length);
+  const sample = generatedBuffer.slice(generatedBuffer.length - sampleSize); // End of file has compression artifacts
+  
   let entropy = 0;
-  if (sample.length > 0) {
-    const freq = new Array(256).fill(0);
-    for (let i = 0; i < sample.length; i++) freq[sample[i]]++;
-    for (let i = 0; i < 256; i++) {
-      if (freq[i] > 0) {
-        const p = freq[i] / sample.length;
-        entropy -= p * Math.log2(p);
-      }
+  if (sample.length > 100) {
+    const freq = new Map<number, number>();
+    for (let i = 0; i < sample.length; i++) {
+      freq.set(sample[i], (freq.get(sample[i]) || 0) + 1);
+    }
+    for (const count of freq.values()) {
+      const p = count / sample.length;
+      entropy -= p * Math.log2(p);
     }
   }
 
+  // JPEG entropy typically 4-7 for photos, <3 suggests solid colors or corruption
   if (entropy < 3.0) {
-    rejectReasons.push("low_detail_output");
-    skinRealismScore = 30;
+    rejectReasons.push("low_entropy_output");
+    skinRealismScore = 35;
+    premiumLookScore = Math.min(premiumLookScore, 40);
+  } else if (entropy > 7.5) {
+    // Very high entropy might indicate noise/artifacts
+    rejectReasons.push("high_noise_suspected");
+    skinRealismScore = 55;
   }
 
-  const overallScore = Math.round((premiumLookScore + skinRealismScore + 70 + 70 + 70) / 5);
+  // Structure check: JPEG should start with FF D8 and end with FF D9
+  const isValidJPEG = generatedBuffer[0] === 0xFF && generatedBuffer[1] === 0xD8 &&
+                      generatedBuffer[generatedBuffer.length - 2] === 0xFF && 
+                      generatedBuffer[generatedBuffer.length - 1] === 0xD9;
+  
+  if (!isValidJPEG && generatedBuffer.length > 0) {
+    rejectReasons.push("invalid_jpeg_structure");
+    premiumLookScore = 10;
+    likenessScore = 20;
+  }
+
+  const overallScore = Math.round(
+    likenessScore * 0.35 +
+    70 * 0.15 + // age drift — can't detect without vision
+    skinRealismScore * 0.15 +
+    70 * 0.10 + // eye consistency — can't detect without vision
+    premiumLookScore * 0.20 +
+    70 * 0.15   // expression — can't detect without vision
+  );
 
   return {
-    likenessScore: 70, // can't assess without reference comparison
-    ageDriftScore: 70,
+    likenessScore,
+    ageDriftScore: 70, // Unknown without vision
     skinRealismScore,
-    eyeConsistencyScore: 70,
+    eyeConsistencyScore: 70, // Unknown without vision
     premiumLookScore,
+    expressionScore: 70, // Unknown without vision
     overallPass: overallScore >= PASS_THRESHOLD && rejectReasons.length === 0,
     overallScore,
     rejectReasons,
   };
 }
 
-/**
- * Main quality gate evaluation.
- * Tries multimodal judge first, falls back to rule-based.
- */
+// ─── Main Entry Point ───────────────────────────────────────────────────────
+
 export async function evaluateGeneratedPhoto(
   referenceBase64: string,
   generatedBase64: string,
@@ -191,24 +393,45 @@ export async function evaluateGeneratedPhoto(
   imageIndex: number
 ): Promise<QualityGateResult> {
   const startTime = Date.now();
-
-  // Try multimodal judge first (only for premium, skip if env says disabled)
-  const useMultimodal = process.env.QUALITY_GATE_MULTIMODAL !== "false";
-  let score: QualityScore | null = null;
-  let method: "multimodal_judge" | "rule_based_fallback" = "rule_based_fallback";
-
-  if (useMultimodal) {
-    score = await multimodalJudge(referenceBase64, generatedBase64, mimeType, style);
-    if (score) method = "multimodal_judge";
+  
+  // Skip if disabled via env
+  if (process.env.QUALITY_GATE_ENABLED === "false") {
+    return {
+      score: {
+        likenessScore: 75, ageDriftScore: 75, skinRealismScore: 75,
+        eyeConsistencyScore: 75, premiumLookScore: 75, expressionScore: 75,
+        overallPass: true, overallScore: 75, rejectReasons: []
+      },
+      shouldReroll: false,
+      evaluationMethod: "skipped",
+      evaluationTimeMs: 0,
+    };
   }
 
+  // Try multimodal judge first
+  let score: QualityScore | null = null;
+  let method: "multimodal_judge" | "rule_based_fallback" = "rule_based_fallback";
+  let judgeModel: string | undefined;
+
+  const useMultimodal = process.env.QUALITY_GATE_MULTIMODAL !== "false";
+  
+  if (useMultimodal) {
+    const judgeResult = await multimodalJudge(referenceBase64, generatedBase64, mimeType, style);
+    if (judgeResult) {
+      score = judgeResult.score;
+      judgeModel = judgeResult.model;
+      method = "multimodal_judge";
+    }
+  }
+
+  // Fallback to rule-based if judge failed or disabled
   if (!score) {
     score = ruleBasedFallback(generatedBuffer, style);
   }
 
   const elapsed = Date.now() - startTime;
 
-  // Determine if reroll is warranted
+  // Determine reroll policy
   const rerollKey = `${generationId}_${imageIndex}`;
   const currentRerolls = rerollCounts.get(rerollKey) || 0;
   const shouldReroll = REROLL_ENABLED && !score.overallPass && currentRerolls < MAX_REROLLS_PER_IMAGE;
@@ -217,29 +440,39 @@ export async function evaluateGeneratedPhoto(
     rerollCounts.set(rerollKey, currentRerolls + 1);
   }
 
-  console.log(`[QualityGate][${generationId}] Image ${imageIndex}: method=${method}, score=${score.overallScore}, pass=${score.overallPass}, reroll=${shouldReroll}, time=${elapsed}ms${score.rejectReasons.length ? ', reasons=[' + score.rejectReasons.join(',') + ']' : ''}`);
+  // Structured logging for monitoring
+  const logData = {
+    genId: generationId,
+    image: imageIndex,
+    method,
+    model: judgeModel || "n/a",
+    score: score.overallScore,
+    pass: score.overallPass,
+    reroll: shouldReroll,
+    timeMs: elapsed,
+    reasons: score.rejectReasons,
+    breakdown: {
+      likeness: score.likenessScore,
+      age: score.ageDriftScore,
+      skin: score.skinRealismScore,
+      eye: score.eyeConsistencyScore,
+      premium: score.premiumLookScore,
+      expression: score.expressionScore,
+    }
+  };
+
+  console.log(`[QualityGate] ${JSON.stringify(logData)}`);
 
   return {
     score,
     shouldReroll,
     evaluationMethod: method,
     evaluationTimeMs: elapsed,
+    judgeModel,
   };
 }
 
-/**
- * Clear reroll tracking for a completed generation.
- * Call this after generation batch completes to prevent memory leak.
- */
-export function clearRerollTracking(generationId: string) {
-  for (const key of rerollCounts.keys()) {
-    if (key.startsWith(generationId)) {
-      rerollCounts.delete(key);
-    }
-  }
-}
-
-// ─── Prompt Quality Linter ────────────────────────────────────────────────────
+// ─── Prompt Quality Linter (retained for backward compatibility) ─────────────
 
 export interface PromptQualityScore {
   likeness: number;
@@ -248,10 +481,6 @@ export interface PromptQualityScore {
   warnings: string[];
 }
 
-/**
- * Static analysis linter for prompt quality.
- * Scores the positive/negative prompts before generation to catch known risks.
- */
 export function evaluatePromptQuality(positivePrompt: string, negativePrompt: string): PromptQualityScore {
   const pos = positivePrompt.toLowerCase();
   const scores: PromptQualityScore = { likeness: 5, agePreservation: 5, skinQuality: 5, warnings: [] };
