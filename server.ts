@@ -111,6 +111,12 @@ async function startServer() {
     });
   }
 
+  // 404 handler for API routes - MUST return JSON, not HTML
+  app.use("/api", (req, res) => {
+    console.log(`[404 API] ${req.method} ${req.path} not found`);
+    res.status(404).json({ error: "API endpoint not found", path: req.path });
+  });
+
   // Global Error Handler (JSON responses). Leaks only the top-level message
   // in production — stack/details stay in server logs.
   app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {

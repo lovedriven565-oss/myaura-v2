@@ -135,11 +135,23 @@ export default function UploadFree() {
     if (chatId) formData.append("telegramChatId", chatId);
 
     try {
+      console.log("[UploadFree] Sending to /api/generate...");
       const res = await apiFetch("/api/generate", {
         method: "POST",
         body: formData,
       });
+      console.log("[UploadFree] Response status:", res.status, res.statusText);
+      
+      // Check if response is HTML (error page)
+      const contentType = res.headers.get('content-type');
+      if (!contentType || contentType.includes('text/html')) {
+        const text = await res.text();
+        console.error("[UploadFree] Got HTML instead of JSON:", text.substring(0, 200));
+        throw new Error("Server error (HTML response). Check server logs.");
+      }
+      
       const data = await res.json();
+      console.log("[UploadFree] Response data:", data);
 
       // Handle auth errors (401) from initData validation
       if (res.status === 401) {
