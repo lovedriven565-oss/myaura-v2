@@ -53,8 +53,9 @@ async function startServer() {
     })
   );
 
-  // JSON body limit — prevents DoS via oversized payloads.
-  app.use(express.json({ limit: "1mb" }));
+  // JSON body limit — increased to 50mb for image uploads (FormData with photos)
+  app.use(express.json({ limit: "50mb" }));
+  app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
   // Initialize DB, Storage and Telegram Bot (fail-fast on misconfig)
   initDb();
