@@ -40,7 +40,67 @@ function getTelegramIds(): { chatId: string | null; userId: string | null } {
 
 }
 
-
+// Image compression utility: resize to max 1024px, JPEG quality 0.8, target ~300-700KB
+async function compressImage(file: File): Promise<File> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      
+      // Calculate new dimensions (max 1024px)
+      let { width, height } = img;
+      const maxDim = 1024;
+      if (width > maxDim || height > maxDim) {
+        if (width > height) {
+          height = Math.round((height * maxDim) / width);
+          width = maxDim;
+        } else {
+          width = Math.round((width * maxDim) / height);
+          height = maxDim;
+        }
+      }
+      
+      // Create canvas and draw resized image
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        reject(new Error('Failed to get canvas context'));
+        return;
+      }
+      ctx.drawImage(img, 0, 0, width, height);
+      
+      // Export as JPEG with quality 0.8
+      canvas.toBlob(
+        (blob) => {
+          if (!blob) {
+            reject(new Error('Canvas toBlob failed'));
+            return;
+          }
+          // Create new File from blob
+          const compressedFile = new File([blob], file.name, {
+            type: 'image/jpeg',
+            lastModified: Date.now()
+          });
+          console.log(`[Compress] ${file.name}: ${(file.size / 1024).toFixed(1)}KB → ${(compressedFile.size / 1024).toFixed(1)}KB (${width}x${height})`);
+          resolve(compressedFile);
+        },
+        'image/jpeg',
+        0.8
+      );
+    };
+    
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error(`Failed to load image: ${file.name}`));
+    };
+    
+    img.src = url;
+  });
+}
 
 interface CatalogPkg {
   id: string;
@@ -317,18 +377,29 @@ export default function UploadPremium() {
         chatId 
       });
 
+      // Compress all images before sending (resize to 1024px, JPEG quality 0.8)
+      console.log(`[GEN DEBUG] Compressing ${files.length} images...`);
+      let compressedFiles: File[];
+      try {
+        compressedFiles = await Promise.all(files.map(f => compressImage(f)));
+        const originalSize = files.reduce((sum, f) => sum + f.size, 0);
+        const compressedSize = compressedFiles.reduce((sum, f) => sum + f.size, 0);
+        console.log(`[GEN DEBUG] Total size: ${(originalSize / 1024 / 1024).toFixed(2)}MB → ${(compressedSize / 1024 / 1024).toFixed(2)}MB`);
+      } catch (compressErr: any) {
+        console.error("[GEN DEBUG] Compression failed:", compressErr);
+        alert("Compression error: " + compressErr.message);
+        setError("Ошибка при обработке фото: " + compressErr.message);
+        setLoading(false);
+        return;
+      }
+
       const formData = new FormData();
       
-      // Append files one by one with error handling
-      try {
-        files.forEach((file, idx) => {
-          console.log(`[GEN DEBUG] Appending file ${idx}:`, file.name, file.type, file.size);
-          formData.append("images", file);
-        });
-      } catch (fileErr: any) {
-        console.error("[GEN DEBUG] Error appending files:", fileErr);
-        throw new Error("Failed to append files: " + fileErr.message);
-      }
+      // Append compressed files
+      compressedFiles.forEach((file, idx) => {
+        console.log(`[GEN DEBUG] Appending file ${idx}:`, file.name, file.type, file.size);
+        formData.append("images", file);
+      });
 
       // Append other fields
       formData.append("packageId", confirmedPackageId);
