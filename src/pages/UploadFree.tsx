@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { Camera, X, Sparkles, Sun, Wand2, Wallet } from "lucide-react";
 import { apiFetch } from "../lib/api";
@@ -33,11 +33,29 @@ export default function UploadFree() {
   const [ageTier, setAgeTier] = useState<"young" | "mature" | "distinguished">("young");
   const [gender, setGender] = useState<"male" | "female" | "unset">("unset");
   const [balanceLoading, setBalanceLoading] = useState(true);
+  const [debugInfo, setDebugInfo] = useState<string>("");
   const navigate = useNavigate();
   const { userId: tgUserId } = getTelegramIds();
 
   // Preview mode: free_credits first, then paid_credits
   const canGenerate = freeCredits > 0 || paidCredits > 0;
+
+  // Cache object URLs to prevent memory leaks in Telegram WebView
+  const objectUrls = useMemo(() => {
+    const urls = files.map(f => URL.createObjectURL(f));
+    console.log('[UploadFree] Created object URLs:', urls.length, 'for', files.length, 'files');
+    return urls;
+  }, [files]);
+
+  // Cleanup object URLs on unmount or when files change
+  useEffect(() => {
+    return () => {
+      objectUrls.forEach(url => {
+        URL.revokeObjectURL(url);
+        console.log('[UploadFree] Revoked object URL:', url.substring(0, 50) + '...');
+      });
+    };
+  }, [objectUrls]);
 
   // Fetch balance on mount
   useEffect(() => {
@@ -61,14 +79,23 @@ export default function UploadFree() {
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
       const newFiles = Array.from(e.target.files);
+      console.log('[UploadFree] Selected files:', newFiles.length, 'names:', newFiles.map(f => f.name));
       const merged = [...files, ...newFiles].slice(0, FREE_MAX_PHOTOS);
+      console.log('[UploadFree] Total files after merge:', merged.length);
       setFiles(merged);
+      setDebugInfo(`Загружено ${merged.length} фото`);
       setError("");
     }
   };
 
   const removeFile = (index: number) => {
-    setFiles(prev => prev.filter((_, i) => i !== index));
+    console.log('[UploadFree] Removing file at index:', index);
+    setFiles(prev => {
+      const newFiles = prev.filter((_, i) => i !== index);
+      console.log('[UploadFree] Files after removal:', newFiles.length);
+      setDebugInfo(`Загружено ${newFiles.length} фото`);
+      return newFiles;
+    });
   };
 
   const handleUpload = async () => {
@@ -200,8 +227,8 @@ export default function UploadFree() {
             {files.length > 0 && (
               <div className="grid grid-cols-3 gap-2 mb-3">
                 {files.map((f, i) => (
-                  <div key={i} className="relative aspect-square rounded-xl overflow-hidden border border-white/10">
-                    <img src={URL.createObjectURL(f)} alt={`Photo ${i + 1}`} className="w-full h-full object-cover" />
+                  <div key={f.name + i} className="relative aspect-square rounded-xl overflow-hidden border border-white/10">
+                    <img src={objectUrls[i]} alt={`Photo ${i + 1}`} className="w-full h-full object-cover" />
                     <button
                       type="button"
                       onClick={() => removeFile(i)}
@@ -233,7 +260,7 @@ export default function UploadFree() {
             <input type="file" accept="image/jpeg, image/png" className="hidden" onChange={handleFileChange} />
             <div className="w-full aspect-[4/5] rounded-2xl bg-white/[0.02] border border-white/10 flex flex-col items-center justify-center overflow-hidden transition-all duration-300 hover:bg-white/[0.04] hover:border-white/20 relative">
               {files.length > 0 ? (
-                <img src={URL.createObjectURL(files[0])} alt="Preview" className="w-full h-full object-cover" />
+                <img src={objectUrls[0]} alt="Preview" className="w-full h-full object-cover" />
               ) : (
                 <div className="flex flex-col items-center text-center p-8 z-10">
                   <div className="w-16 h-16 rounded-full bg-white/5 flex items-center justify-center mb-6 group-hover:scale-110 transition-transform duration-300">
@@ -248,6 +275,13 @@ export default function UploadFree() {
         )}
 
         {error && <div className="text-red-400 text-[14px] mb-6 text-center bg-red-400/10 py-3 rounded-xl border border-red-400/20">{error}</div>}
+
+        {/* Debug info for Telegram WebView troubleshooting */}
+        {debugInfo && (
+          <div className="text-emerald-400 text-[12px] mb-4 text-center bg-emerald-500/10 py-2 rounded-lg border border-emerald-500/20">
+            {debugInfo} {FREE_V2 ? `(макс. ${FREE_MAX_PHOTOS})` : ''}
+          </div>
+        )}
 
         <section className="grid grid-cols-1 gap-3 mb-10">
           <div className="flex items-center gap-4 p-4 rounded-xl bg-white/[0.03] border border-white/5">
