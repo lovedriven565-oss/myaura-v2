@@ -329,6 +329,12 @@ apiRouter.post("/generate",
   upload.fields([{ name: "images", maxCount: 15 }]),
   async (req, res, next) => {
     try {
+      console.log('[Generate] Request received:', {
+        body: req.body,
+        files: req.files ? 'present' : 'missing',
+        contentType: req.headers['content-type']
+      });
+      
       // SAFETY CHECK: Handle both single file and multiple files
       const imageFiles = (req.files as { [fieldname: string]: Express.Multer.File[] })?.images;
       
@@ -874,6 +880,7 @@ apiRouter.post("/cancel/:id", async (req, res, next) => {
 // ─── Monetization: Packages, Balance, Catalog, Invoice ─────────────────────
 
 const STORE_PACKAGES = [
+  { id: "TEST_1_STAR", title: "Тест: 1 генерация", generations: 1, priceBYN: 0.01, priceRUB: 1, starsPrice: 1, hidden: true },
   { id: "starter", title: "Starter", generations: PACKAGES.starter.outputCount, priceBYN: 9.90, priceRUB: 250, starsPrice: 150 },
   { id: "pro",     title: "Pro",     generations: PACKAGES.pro.outputCount,     priceBYN: 24.90, priceRUB: 650, starsPrice: 350, badge: "ХИТ ПРОДАЖ" },
   { id: "max",     title: "Max",     generations: PACKAGES.max.outputCount,     priceBYN: 49.90, priceRUB: 1300, starsPrice: 750 },
@@ -998,18 +1005,20 @@ apiRouter.get("/user/balance", async (req, res, next) => {
   }
 });
 
-// Get store catalog
+// Get store catalog (exclude hidden test packages)
 apiRouter.get("/payment/catalog", (_req, res) => {
-  const catalog = STORE_PACKAGES.map(pkg => ({
-    id: pkg.id,
-    title: pkg.title,
-    generations: pkg.generations,
-    priceBYN: pkg.priceBYN,
-    priceRUB: pkg.priceRUB,
-    starsPrice: pkg.starsPrice,
-    badge: (pkg as any).badge || null,
-  }));
-  res.json({ catalog });
+  const catalog = STORE_PACKAGES
+    .filter(pkg => !pkg.hidden)
+    .map(pkg => ({
+      id: pkg.id,
+      title: pkg.title,
+      generations: pkg.generations,
+      priceBYN: pkg.priceBYN,
+      priceRUB: pkg.priceRUB,
+      starsPrice: pkg.starsPrice,
+      badge: pkg.badge || null
+    }));
+  res.json({ packages: catalog });
 });
 
 // Create Telegram Stars invoice
@@ -1034,6 +1043,78 @@ apiRouter.post("/payment/create-invoice", async (req, res, next) => {
     });
 
     res.json({ invoiceLink, starsPrice: pkg.starsPrice });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Telegram Stars Webhook ────────────────────────────────────────────────
+/**
+ * POST /api/webhook/telegram
+ * Unified webhook for all Telegram payment events:
+ * - pre_checkout_query: approve payment UI
+ * - successful_payment: add credits (idempotent)
+ */
+apiRouter.post("/webhook/telegram", async (req, res, next) => {
+  try {
+    // 1. Pre-checkout: approve payment UI
+    if (req.body.pre_checkout_query) {
+      const { pre_checkout_query } = req.body;
+      console.log(`[PreCheckout] Approved query_id=${pre_checkout_query.id}, user=${pre_checkout_query.from?.id}`);
+      return res.json({ ok: true });
+    }
+
+    // 2. Successful payment: add credits
+    if (req.body.message?.successful_payment) {
+      const payment = req.body.message.successful_payment;
+      const telegramId = req.body.message.from?.id;
+      const payload = payment.invoice_payload;  // Format: "telegramId_packageId_timestamp"
+
+      console.log(`[Payment] Successful payment from ${telegramId}, payload=${payload}`);
+
+      // Parse payload
+      const parts = payload.split('_');
+      if (parts.length < 2) {
+        return res.status(400).json({ error: "Invalid payload format" });
+      }
+
+      const packageId = parts[1];
+      const pkg = STORE_PACKAGES.find(p => p.id === packageId);
+
+      if (!pkg) {
+        console.error(`[Payment] Package not found: ${packageId}`);
+        return res.status(400).json({ error: "Package not found" });
+      }
+
+      // Add credits via RPC (idempotent via telegram_payment_charge_id)
+      const db = getDb();
+      const { data: success, error } = await db.rpc('add_paid_credits', {
+        p_telegram_id: telegramId,
+        p_credits: pkg.generations,
+        p_package_id: packageId,
+        p_stars_amount: payment.total_amount,
+        p_telegram_charge_id: payment.telegram_payment_charge_id,
+        p_payload: payload
+      });
+
+      if (error) {
+        console.error(`[Payment] RPC error:`, error);
+        throw new Error(`Failed to add credits: ${error.message}`);
+      }
+
+      if (!success) {
+        console.log(`[Payment] Duplicate payment, already processed: ${payment.telegram_payment_charge_id}`);
+        return res.json({ ok: true, message: "Already processed" });
+      }
+
+      console.log(`[Payment] Added ${pkg.generations} credits to user ${telegramId}`);
+      return res.json({ ok: true, creditsAdded: pkg.generations });
+    }
+
+    // 3. Unknown event: acknowledge but ignore
+    console.log(`[Webhook] Unknown event type, body keys: ${Object.keys(req.body).join(', ')}`);
+    return res.json({ ok: true });
+
   } catch (err) {
     next(err);
   }
