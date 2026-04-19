@@ -11,6 +11,14 @@ import { selectBestReferencePhotos } from "./inputCuration.js";
 import { evaluateGeneratedPhoto, clearRerollTracking } from "./qualityGate.js";
 import { enqueueGeneration, refundCredit, markCreditConsumed, checkRateLimit } from "./dbQueue.js";
 import { updateGenerationHeartbeat } from "./watchdog.js";
+import {
+  MAX_FILE_SIZE_BYTES,
+  MAX_FILES_PER_REQUEST,
+  PRESIGN_TTL_SEC,
+  ALLOWED_UPLOAD_CONTENT_TYPES,
+  AllowedUploadContentType,
+  buildUploadKey,
+} from "./config/uploads.js";
 import { z } from "zod";
 import crypto from "crypto";
 
@@ -462,6 +470,121 @@ function isValidImageBuffer(buf: Buffer, declaredMime: string): boolean {
   if (buf.length >= 12 && buf.toString("ascii", 4, 8) === "ftyp") return true;
   return false;
 }
+
+// ─── Zod schema for POST /api/upload-urls ──────────────────────────────────
+// Client declares what it intends to upload — name, byte size, MIME — and we
+// mint one presigned PUT URL per file. Anything outside declared limits is
+// rejected here (before we ever touch R2).
+const PresignRequestSchema = z.object({
+  packageId: z.enum(["free", "starter", "pro", "max"]),
+  files: z
+    .array(
+      z.object({
+        // Original filename — kept for audit only. We do NOT use it to build
+        // the R2 key; see buildUploadKey() which uses a server-chosen extension.
+        name: z.string().min(1).max(200),
+        size: z
+          .number()
+          .int()
+          .positive()
+          .max(MAX_FILE_SIZE_BYTES, `File exceeds ${MAX_FILE_SIZE_BYTES} bytes`),
+        contentType: z.enum(ALLOWED_UPLOAD_CONTENT_TYPES),
+      })
+    )
+    .min(1, "At least one file is required")
+    .max(MAX_FILES_PER_REQUEST, `Too many files (max ${MAX_FILES_PER_REQUEST})`),
+});
+
+// ─── POST /api/upload-urls ───────────────────────────────────────────────────
+// Mints presigned PUT URLs so the client can upload originals directly to R2,
+// completely bypassing the 32 MB Cloud Run request limit.
+//
+// Security controls layered here:
+//   1. initDataAuthMiddleware (applied on apiRouter) — caller is authenticated.
+//   2. generationRateLimitMiddleware — same per-user cooldown as /generate.
+//   3. Zod schema — size / count / MIME strictly bounded.
+//   4. Package count check — free users cannot mint 15 URLs.
+//   5. Key format — uploads/{telegramUserId}/{uuid}.{ext}, built server-side.
+//      /generate will later verify the prefix matches the caller's userId.
+//   6. presignPut() locks Content-Type + Content-Length into the signature.
+apiRouter.post(
+  "/upload-urls",
+  (req, res, next) => generationRateLimitMiddleware(req, res, next),
+  async (req, res, next) => {
+    try {
+      // Auth: telegramId must be set by initDataAuthMiddleware (strict in prod).
+      // We accept a body fallback only in non-strict dev — matches auth middleware policy.
+      const authedTid: number | undefined = (req as any).telegramId;
+      const bodyTid: number | undefined = req.body?.telegramUserId
+        ? parseInt(String(req.body.telegramUserId), 10)
+        : undefined;
+      const isProd = process.env.NODE_ENV === "production";
+      const telegramUserId = authedTid || (isProd ? undefined : bodyTid);
+
+      if (!telegramUserId) {
+        return res.status(401).json({
+          error: "Authenticated Telegram user required",
+          code: "NO_USER_ID",
+        });
+      }
+
+      // Validate request body
+      const parseResult = PresignRequestSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        const details = parseResult.error.issues.map(i => ({
+          path: i.path.join(".") || "(root)",
+          code: i.code,
+          message: i.message,
+        }));
+        const summary = details.map(d => `${d.path}: ${d.message}`).join("; ");
+        console.warn(`[UploadUrls] Validation failed for user=${telegramUserId}: ${summary}`);
+        return res.status(400).json({
+          error: `Validation failed: ${summary}`,
+          code: "VALIDATION_FAILED",
+          details,
+        });
+      }
+      const body = parseResult.data;
+
+      // Package count sanity: reject e.g. 15 uploads for a Free package
+      const pkg = PACKAGES[body.packageId];
+      if (!pkg) {
+        return res.status(400).json({ error: "Invalid packageId", code: "INVALID_PACKAGE" });
+      }
+      if (body.files.length < pkg.minRefs || body.files.length > pkg.maxRefs) {
+        return res.status(400).json({
+          error: `Package '${body.packageId}' allows ${pkg.minRefs}-${pkg.maxRefs} files, got ${body.files.length}`,
+          code: "INVALID_IMAGE_COUNT",
+        });
+      }
+
+      // Mint presigned URLs in parallel — R2 signing is CPU-only, no I/O
+      const slots = await Promise.all(
+        body.files.map(async file => {
+          const key = buildUploadKey(
+            telegramUserId,
+            uuidv4(),
+            file.contentType as AllowedUploadContentType
+          );
+          return storage.presignPut(key, file.contentType, file.size, PRESIGN_TTL_SEC);
+        })
+      );
+
+      console.log(
+        `[UploadUrls] Minted ${slots.length} presigned URL(s) for user=${telegramUserId}, ` +
+        `package=${body.packageId}, ttl=${PRESIGN_TTL_SEC}s`
+      );
+
+      return res.json({
+        uploads: slots,
+        ttlSec: PRESIGN_TTL_SEC,
+      });
+    } catch (err: any) {
+      console.error("[UploadUrls] Unexpected error:", err?.message || err);
+      next(err);
+    }
+  }
+);
 
 // 1. Upload & Start Generation (Supports single file for 'free' and multiple for 'premium')
 apiRouter.post("/generate",
