@@ -120,26 +120,84 @@ export async function failGeneration(
 
 /**
  * Database-backed rate limit check.
- * Returns seconds to wait (0 if allowed).
+ *
+ * Returns the number of seconds the caller must wait before retrying. `0`
+ * means the request is allowed; any positive number means the user is in
+ * cooldown.
+ *
+ * Robustness contract:
+ *   • If the RPC is missing, misimplemented, or returns a non-numeric payload
+ *     (e.g. a prior deploy of the SQL function returned BOOLEAN instead of
+ *     INT — that bug caused the infamous "retry in trues" log line), we
+ *     FAIL OPEN. Rate limiting is a convenience guardrail, not a security
+ *     boundary; a malformed RPC must never permanently lock out a user.
+ *   • We additionally emit a single warn-line when we see a non-numeric
+ *     payload so operators can spot the SQL regression quickly.
  */
 export async function checkRateLimit(
   userId: number,
   cooldownSeconds: number = 120
 ): Promise<number> {
   const db = getDb();
-  
+
   const { data, error } = await db.rpc('check_rate_limit', {
     p_user_id: userId,
-    p_cooldown_seconds: cooldownSeconds
+    p_cooldown_seconds: cooldownSeconds,
   });
-  
+
   if (error) {
     console.error('[DbQueue] Rate limit check error:', error.message);
-    // Fail open: allow if we can't check
-    return 0;
+    return 0; // Fail open
   }
-  
-  return data || 0;
+
+  // The legacy SQL signature returns INT seconds. A broken signature that
+  // returns BOOLEAN (`true` = blocked, `false` = allowed) is the exact bug
+  // that produced "retry in trues" — `true > 0` is truthy in JS and gets
+  // interpolated as the string "true". Coerce defensively.
+  if (typeof data === 'number' && Number.isFinite(data)) {
+    return Math.max(0, Math.floor(data));
+  }
+
+  if (data !== null && data !== undefined) {
+    console.warn(
+      `[DbQueue] check_rate_limit returned non-numeric payload: ${JSON.stringify(data)} ` +
+      `(type=${typeof data}). Failing open. Fix the SQL function to RETURNS INT.`
+    );
+  }
+  return 0; // Fail open on unknown payload
+}
+
+/**
+ * Roll back the rate-limit timestamp for a user.
+ *
+ * Why this exists:
+ *   `check_rate_limit` is side-effecting — it both reads the cooldown and
+ *   stamps `last_generation = now()` in one atomic step. That is fine when
+ *   the call leads to a successful generation, but if the request fails
+ *   downstream (IAM error, storage error, pre-consumption validation…) the
+ *   user is penalised for our outage. `clearRateLimit` undoes that stamp so
+ *   the user can retry immediately.
+ *
+ * Idempotent: safe to call even when no row exists (treated as a no-op).
+ * Never throws — rollback failure must not mask the original error.
+ */
+export async function clearRateLimit(userId: number): Promise<void> {
+  try {
+    const db = getDb();
+    // Reset the window so the user is immediately eligible again. We set
+    // last_generation far enough in the past that any reasonable cooldown
+    // passes. Using a hard `1970-01-01` avoids pulling a date library here.
+    const { error } = await db
+      .from('user_rate_limits')
+      .update({ last_generation: new Date(0).toISOString() })
+      .eq('user_id', userId);
+
+    if (error) {
+      console.warn(`[DbQueue] clearRateLimit failed for user=${userId}: ${error.message}`);
+    }
+  } catch (err: any) {
+    console.warn(`[DbQueue] clearRateLimit threw for user=${userId}: ${err?.message || err}`);
+  }
 }
 
 /**

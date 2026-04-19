@@ -8,7 +8,7 @@ import { validatePackageInput, buildStyleSchedule, buildStyleScheduleWithCount, 
 import { deliverTelegramPhoto, deliverTelegramResults, notifyReferralAwarded } from "./telegram.js";
 import { selectBestReferencePhotos } from "./inputCuration.js";
 import { evaluateGeneratedPhoto, clearRerollTracking } from "./qualityGate.js";
-import { enqueueGeneration, refundCredit, markCreditConsumed, checkRateLimit } from "./dbQueue.js";
+import { enqueueGeneration, refundCredit, markCreditConsumed, checkRateLimit, clearRateLimit } from "./dbQueue.js";
 import { updateGenerationHeartbeat } from "./watchdog.js";
 import {
   MAX_FILE_SIZE_BYTES,
@@ -399,23 +399,52 @@ async function tryAwardReferral(inviteeId: number, generationId: string): Promis
 // ─── Per-user Generation Rate Limiter (CloudRun-safe via PostgreSQL) ─────────
 const GENERATION_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes per user
 
-async function generationRateLimitMiddleware(req: any, res: any, next: any) {
-  const telegramUserId = parseInt(req.body?.telegramUserId, 10);
-  if (!telegramUserId || isNaN(telegramUserId)) return next();
+/**
+ * Per-user generation rate-limit guard.
+ *
+ * Returns `true` if the request was denied and a 429 response was sent; the
+ * caller must stop processing. Returns `false` if the request may proceed.
+ *
+ * Defensively coerces the waitSec payload — see checkRateLimit() contract.
+ * Never throws: on any internal failure we fail OPEN (return false) rather
+ * than lock the user out.
+ */
+async function enforceGenerationRateLimit(
+  req: any,
+  res: any,
+  telegramUserId: number
+): Promise<boolean> {
+  if (!telegramUserId || !Number.isFinite(telegramUserId)) return false;
 
   const cooldownSec = Math.ceil(GENERATION_COOLDOWN_MS / 1000);
-  const waitSec = await checkRateLimit(telegramUserId, cooldownSec);
-
-  if (waitSec > 0) {
-    console.warn(`[RateLimit] userId=${telegramUserId} blocked, retry in ${waitSec}s`);
-    return res.status(429).json({
-      error: `Слишком много запросов. Подождите ${waitSec} секунд.`,
-      code: "RATE_LIMITED",
-      retryAfter: waitSec
-    });
+  let waitSec: number;
+  try {
+    waitSec = await checkRateLimit(telegramUserId, cooldownSec);
+  } catch (err: any) {
+    console.warn(`[RateLimit] check threw, failing open: ${err?.message || err}`);
+    return false;
   }
 
-  next();
+  const safeWait = typeof waitSec === 'number' && Number.isFinite(waitSec)
+    ? Math.max(0, Math.floor(waitSec))
+    : 0;
+
+  if (safeWait > 0) {
+    console.warn(`[RateLimit] userId=${telegramUserId} blocked, retry in ${safeWait}s`);
+    res.status(429).json({
+      error: `Слишком много запросов. Подождите ${safeWait} секунд.`,
+      code: "RATE_LIMITED",
+      retryAfter: safeWait,
+    });
+    // Tag the request for callers that want to attribute the block in logs.
+    (req as any).rateLimited = true;
+    return true;
+  }
+
+  // Successful check — the RPC has already stamped the cooldown window.
+  // Mark the request so catch blocks know a rollback is required on failure.
+  (req as any).rateLimitStamped = true;
+  return false;
 }
 
 // Reuse the upload-config allowlist so MIME checks have a single source of truth.
@@ -495,7 +524,7 @@ const PresignRequestSchema = z.object({
 //
 // Security controls layered here:
 //   1. initDataAuthMiddleware (applied on apiRouter) — caller is authenticated.
-//   2. generationRateLimitMiddleware — same per-user cooldown as /generate.
+//   2. No rate-limit here — see generationRateLimiter docs above for why.
 //   3. Zod schema — size / count / MIME strictly bounded.
 //   4. Package count check — free users cannot mint 15 URLs.
 //   5. Key format — uploads/{telegramUserId}/{uuid}.{ext}, built server-side.
@@ -503,7 +532,9 @@ const PresignRequestSchema = z.object({
 //   6. presignPut() locks Content-Type + Content-Length into the signature.
 apiRouter.post(
   "/upload-urls",
-  (req, res, next) => generationRateLimitMiddleware(req, res, next),
+  // NO rate-limit middleware here — /upload-urls is a cheap, idempotent-ish
+  // URL mint that users legitimately hit multiple times while picking photos.
+  // The real throttle lives inside /generate where the credit spend happens.
   async (req, res, next) => {
     try {
       // Auth: telegramId must be set by initDataAuthMiddleware (strict in prod).
@@ -585,7 +616,9 @@ apiRouter.post(
 //    must first call /api/upload-urls, PUT each file to R2, then send only the
 //    resulting object keys here. Cloud Run never sees image bytes on the HTTP path.
 apiRouter.post("/generate",
-  (req, res, next) => generationRateLimitMiddleware(req, res, next),
+  // Rate-limit is enforced INSIDE the handler (not as middleware) so that it
+  // only fires after the request passes Zod + auth + package + R2 checks.
+  // See enforceGenerationRateLimit() and the rollback block at the bottom.
   async (req, res, next) => {
     try {
       console.log('[Generate] Request received:', {
@@ -714,6 +747,14 @@ apiRouter.post("/generate",
 
     const imageFiles = fetchResults as LoadedImage[];
 
+    // ── Rate limit: enforced here, AFTER all validation passes, BEFORE any
+    //    credit/DB spend. This means invalid requests (Zod, auth, package,
+    //    R2) never consume the user's cooldown budget — only legit attempts
+    //    do. If any step below this line fails, we MUST call clearRateLimit
+    //    in the rollback branches to avoid penalising the user for our bug.
+    const rateLimited = await enforceGenerationRateLimit(req, res, body.telegramUserId);
+    if (rateLimited) return;
+
     // R2 keys themselves ARE the "original paths" — no re-upload. This keeps
     // storage ops halved and avoids a window where the copy differs from the
     // reference. Retention cron (Step 6) will sweep uploads/ based on DB refs.
@@ -753,6 +794,9 @@ apiRouter.post("/generate",
       }
       if (curation.hardReject) {
         console.warn(`[${id}] [FREE_V2] HARD REJECT: ${curation.hardRejectReason}`);
+        // Quality-gate rejection is a pre-consumption failure — the user never
+        // burned a credit, so the rate-limit stamp would be unfair punishment.
+        if ((req as any).rateLimitStamped) await clearRateLimit(body.telegramUserId);
         return res.status(400).json({
           error: curation.hardRejectReason,
           code: "PHOTO_QUALITY_REJECTED",
@@ -770,6 +814,7 @@ apiRouter.post("/generate",
         .single();
 
       if (userError || !user) {
+        if ((req as any).rateLimitStamped) await clearRateLimit(body.telegramUserId);
         return res.status(404).json({ error: "User not found", code: "USER_NOT_FOUND" });
       }
 
@@ -790,6 +835,9 @@ apiRouter.post("/generate",
       }
 
       if (!creditType) {
+        // No credit → request is rejected without side-effects. Clear the
+        // rate-limit stamp so the user can immediately retry after topping up.
+        if ((req as any).rateLimitStamped) await clearRateLimit(body.telegramUserId);
         return res.status(403).json({ error: "Нет доступных генераций", code: "INSUFFICIENT_FUNDS" });
       }
 
@@ -801,6 +849,10 @@ apiRouter.post("/generate",
 
       if (consumeError) {
         console.error("Credit consumption error:", consumeError);
+        // DB failure — the consume_credit RPC is atomic so a failure means the
+        // credit was NOT debited. Release the rate-limit stamp too so the user
+        // can retry without waiting through an unjustified cooldown.
+        if ((req as any).rateLimitStamped) await clearRateLimit(body.telegramUserId);
         return res.status(500).json({ error: "Failed to consume credit", code: "CREDIT_ERROR" });
       }
 
@@ -832,6 +884,15 @@ apiRouter.post("/generate",
 
     if (insertError) {
       console.error("Supabase insert error:", insertError);
+      // Insert failed AFTER credit was consumed — refund both the credit AND
+      // the rate-limit stamp so the user is not left holding the bag.
+      const _creditType = (req as any).creditType as ("free" | "paid" | undefined);
+      if (_creditType) {
+        await refundCredit(body.telegramUserId, _creditType, id, "generation_insert_failed").catch(
+          err => console.warn(`[${id}] refund after insert failure threw:`, err?.message || err)
+        );
+      }
+      if ((req as any).rateLimitStamped) await clearRateLimit(body.telegramUserId);
       return next(new Error("Failed to create generation record"));
     }
 
@@ -1085,6 +1146,13 @@ apiRouter.post("/generate",
     if (res.headersSent) {
       console.error("[Generate] Post-response error (headers already sent):", error?.message || error);
       return;
+    }
+    // Uncaught early-path failure: release the rate-limit stamp so the user
+    // can retry right away. Any credit side-effect that reached the DB is
+    // handled by the watchdog + refund_credit RPC.
+    const _tid = parseInt((req as any).body?.telegramUserId, 10);
+    if ((req as any).rateLimitStamped && Number.isFinite(_tid)) {
+      await clearRateLimit(_tid);
     }
     next(error);
   }

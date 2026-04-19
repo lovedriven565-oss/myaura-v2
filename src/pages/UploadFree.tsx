@@ -21,8 +21,15 @@ function getTelegramIds(): { chatId: string | null; userId: string | null } {
   }
 }
 
-const FREE_V2 = import.meta.env.VITE_FREE_MULTI_REF_V2_ENABLED === "true";
-const FREE_MAX_PHOTOS = FREE_V2 ? 5 : 1;
+// Phase 2 decision: Free tier is currently 1 photo on the server regardless
+// of the VITE_FREE_MULTI_REF_V2_ENABLED build flag, because FREE_MULTI_REF_V2_ENABLED
+// is not set on Cloud Run production. Pinning both values here avoids a UI/BE
+// mismatch (the UI previously advertised "up to 5 photos" while /api/generate
+// rejected anything >1 with INVALID_IMAGE_COUNT). When Free-v2 is re-enabled
+// at the API level, flip this constant back to the build flag AND set the env
+// var on Cloud Run in the same release — never one without the other.
+const FREE_V2 = false;
+const FREE_MAX_PHOTOS = 1;
 
 export default function UploadFree() {
   const [files, setFiles] = useState<File[]>([]);
