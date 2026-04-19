@@ -1,5 +1,4 @@
 import { Router } from "express";
-import multer from "multer";
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "./db.js";
 import { storage } from "./storage.js";
@@ -18,6 +17,8 @@ import {
   ALLOWED_UPLOAD_CONTENT_TYPES,
   AllowedUploadContentType,
   buildUploadKey,
+  UPLOAD_KEY_REGEX,
+  UPLOAD_KEY_PREFIX,
 } from "./config/uploads.js";
 import { z } from "zod";
 import crypto from "crypto";
@@ -417,41 +418,34 @@ async function generationRateLimitMiddleware(req: any, res: any, next: any) {
   next();
 }
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB limit per file
-
-const ALLOWED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]);
+// Reuse the upload-config allowlist so MIME checks have a single source of truth.
+const ALLOWED_IMAGE_MIMES = new Set<string>(ALLOWED_UPLOAD_CONTENT_TYPES);
 
 // ─── Zod schema for POST /api/generate ──────────────────────────────────────
-// Validates every field with a single source of truth. Any field that fails
-// returns 400 with the exact path + reason, so the frontend (or us, debugging)
-// knows precisely what broke.
+// Single source of truth for every field. Every failure path is surfaced as
+// a 400 with the exact field/reason, so regressions are immediately debuggable.
 //
-// Note on styleIds: the frontend sends JSON.stringify(["business"]) in a
-// multipart/form-data field, so we accept either a JSON-encoded string or an
-// already-parsed array and normalise to string[] via z.preprocess.
+// Phase 2: the body is now pure JSON. The client first mints presigned URLs
+// via /api/upload-urls, PUTs each original directly to R2, and sends only the
+// resulting R2 object keys here — so Cloud Run never touches image bytes on
+// the HTTP request path.
 const StyleIdEnum = z.enum(["business", "lifestyle", "aura", "cinematic", "luxury", "editorial"]);
 
 const GenerateBodySchema = z.object({
   packageId: z.enum(["free", "starter", "pro", "max"]),
   mode: z.enum(["preview", "premium"]),
-  styleIds: z.preprocess(
-    (raw) => {
-      if (Array.isArray(raw)) return raw;
-      if (typeof raw === "string") {
-        const trimmed = raw.trim();
-        if (trimmed.startsWith("[")) {
-          try { return JSON.parse(trimmed); } catch { return [trimmed]; }
-        }
-        return [trimmed];
-      }
-      return raw;
-    },
-    z.array(StyleIdEnum).min(1, "At least one style is required").max(6)
-  ),
+  styleIds: z.array(StyleIdEnum).min(1, "At least one style is required").max(6),
   ageTier: z.enum(["young", "mature", "distinguished"]).default("young"),
   gender: z.enum(["male", "female", "unset"]).default("unset"),
   telegramUserId: z.coerce.number().int().positive(),
   telegramChatId: z.coerce.number().int().optional(),
+  // R2 object keys returned by /api/upload-urls. Regex enforces our canonical
+  // "uploads/{telegramUserId}/{uuid}.{ext}" format and rejects anything else
+  // (path traversal, cross-user keys, unexpected prefixes).
+  imageKeys: z
+    .array(z.string().regex(UPLOAD_KEY_REGEX, "Invalid R2 key format"))
+    .min(1, "At least one imageKey is required")
+    .max(MAX_FILES_PER_REQUEST, `Too many files (max ${MAX_FILES_PER_REQUEST})`),
 });
 
 export type GenerateBody = z.infer<typeof GenerateBodySchema>;
@@ -586,23 +580,26 @@ apiRouter.post(
   }
 );
 
-// 1. Upload & Start Generation (Supports single file for 'free' and multiple for 'premium')
+// 1. Start Generation — expects imageKeys previously uploaded via /api/upload-urls.
+//    Phase 2 cutover: this endpoint no longer accepts multipart bodies. The client
+//    must first call /api/upload-urls, PUT each file to R2, then send only the
+//    resulting object keys here. Cloud Run never sees image bytes on the HTTP path.
 apiRouter.post("/generate",
   (req, res, next) => generationRateLimitMiddleware(req, res, next),
-  upload.fields([{ name: "images", maxCount: 15 }]),
   async (req, res, next) => {
     try {
       console.log('[Generate] Request received:', {
-        body: { ...req.body, initData: req.body?.initData ? '<redacted>' : undefined },
-        files: req.files ? 'present' : 'missing',
+        body: {
+          ...req.body,
+          initData: req.body?.initData ? '<redacted>' : undefined,
+          imageKeys: Array.isArray(req.body?.imageKeys) ? `[${req.body.imageKeys.length} keys]` : req.body?.imageKeys,
+        },
         contentType: req.headers['content-type'],
       });
 
       // ── Zod validation: single source of truth for every field ──
       const parseResult = GenerateBodySchema.safeParse(req.body);
       if (!parseResult.success) {
-        // Build a human-readable list of which fields failed and why.
-        // This is the difference between "400 Bad Request" and actionable debug info.
         const details = parseResult.error.issues.map(issue => ({
           path: issue.path.join(".") || "(root)",
           code: issue.code,
@@ -618,46 +615,109 @@ apiRouter.post("/generate",
       }
       const body = parseResult.data;
 
-      // ── File presence + magic-byte validation ──
-      const imageFiles = (req.files as { [fieldname: string]: Express.Multer.File[] })?.images;
-      if (!imageFiles || imageFiles.length === 0) {
-        return res.status(400).json({
-          error: "No image files provided. Please upload at least one image.",
-          code: "NO_FILES",
-        });
-      }
-
-      for (const file of imageFiles) {
-        if (!isValidImageBuffer(file.buffer, file.mimetype)) {
-          return res.status(400).json({
-            error: `Invalid image file: ${file.originalname}. Supported formats: JPEG, PNG, WebP, HEIC.`,
-            code: "INVALID_IMAGE",
-          });
-        }
-      }
-
     const packageId = body.packageId;
     const styleIds: string[] = body.styleIds;
+    const imageKeys: string[] = body.imageKeys;
 
-    // Validate package-specific constraints (ref count, max styles)
-    const validation = validatePackageInput(packageId, imageFiles.length, styleIds);
+    // ── Authorization: every key must belong to the caller. The regex already
+    //    enforces the "uploads/{digits}/{uuid}.{ext}" shape, so here we only
+    //    compare the userId segment against the authenticated telegramUserId.
+    const expectedPrefix = `${UPLOAD_KEY_PREFIX}${body.telegramUserId}/`;
+    const foreignKey = imageKeys.find(k => !k.startsWith(expectedPrefix));
+    if (foreignKey) {
+      console.warn(
+        `[Generate] Cross-user key rejected: user=${body.telegramUserId} key=${foreignKey}`
+      );
+      return res.status(403).json({
+        error: "One or more imageKeys do not belong to the authenticated user.",
+        code: "FORBIDDEN_KEY",
+      });
+    }
+
+    // ── Package constraints (count vs min/max refs, style limits) ──
+    const validation = validatePackageInput(packageId, imageKeys.length, styleIds);
     if (!validation.ok || !validation.config) {
       return res.status(400).json({ error: validation.error, code: validation.code });
     }
     const config = validation.config;
-    
+
     const id = uuidv4();
     // outputCount is always server-authoritative from package config — never trusted from client
     const outputCount = config.outputCount;
-    console.log(`[${id}] New generation request: packageId=${packageId}, mode=${body.mode}, outputCount=${outputCount}, files=${imageFiles.length}, styles=${styleIds}`);
+    console.log(
+      `[${id}] New generation request: packageId=${packageId}, mode=${body.mode}, ` +
+      `outputCount=${outputCount}, keys=${imageKeys.length}, styles=${styleIds}`
+    );
 
-    // Save originals
-    const originalPaths: string[] = [];
-    for (let i = 0; i < imageFiles.length; i++) {
-      const file = imageFiles[i];
-      const path = await storage.save(file.buffer, `${id}_${i}_${file.originalname}`, "original");
-      originalPaths.push(path);
+    // ── Fetch originals from R2 in parallel ──
+    // Each slot is verified with headObject (exists + size/type in bounds), then
+    // downloaded and magic-byte checked. Any failure aborts the request with
+    // the precise key that failed so frontend debugging is trivial.
+    type LoadedImage = {
+      key: string;
+      buffer: Buffer;
+      mimetype: string;
+      originalname: string;
+    };
+
+    const fetchResults = await Promise.all(
+      imageKeys.map(async (key): Promise<LoadedImage | { error: string; code: string; key: string }> => {
+        const meta = await storage.headObject(key);
+        if (!meta.exists) {
+          return { error: `R2 object not found: ${key}`, code: "KEY_NOT_FOUND", key };
+        }
+        if (meta.size == null || meta.size <= 0 || meta.size > MAX_FILE_SIZE_BYTES) {
+          return {
+            error: `R2 object size out of range (${meta.size} bytes): ${key}`,
+            code: "KEY_SIZE_INVALID",
+            key,
+          };
+        }
+        const declaredMime = meta.contentType || "";
+        if (!ALLOWED_IMAGE_MIMES.has(declaredMime)) {
+          return {
+            error: `Unsupported content-type '${declaredMime}' on ${key}`,
+            code: "KEY_MIME_INVALID",
+            key,
+          };
+        }
+
+        const buffer = await storage.get(key);
+        if (!buffer) {
+          return { error: `Failed to read R2 object: ${key}`, code: "KEY_READ_FAILED", key };
+        }
+        if (!isValidImageBuffer(buffer, declaredMime)) {
+          return {
+            error: `R2 object failed magic-byte check: ${key}`,
+            code: "KEY_BYTES_INVALID",
+            key,
+          };
+        }
+
+        // Derive a display-only filename from the key's UUID segment.
+        const basename = key.split("/").pop() || "image";
+        return { key, buffer, mimetype: declaredMime, originalname: basename };
+      })
+    );
+
+    const firstFailure = fetchResults.find(r => "error" in r) as
+      | { error: string; code: string; key: string }
+      | undefined;
+    if (firstFailure) {
+      console.warn(`[${id}] Key validation failed: ${firstFailure.code} — ${firstFailure.error}`);
+      return res.status(400).json({
+        error: firstFailure.error,
+        code: firstFailure.code,
+        key: firstFailure.key,
+      });
     }
+
+    const imageFiles = fetchResults as LoadedImage[];
+
+    // R2 keys themselves ARE the "original paths" — no re-upload. This keeps
+    // storage ops halved and avoids a window where the copy differs from the
+    // reference. Retention cron (Step 6) will sweep uploads/ based on DB refs.
+    const originalPaths: string[] = imageKeys;
 
     // Calculate expiration from package config
     const retentionMinutes = parseInt(process.env[config.retentionEnvKey] || config.retentionDefault.toString());
