@@ -81,11 +81,60 @@ async function withExponentialBackoff<T>(
 // A fresh GoogleGenAI instance with a disposable AbortController is created
 // per-request so TCP connections are ACTUALLY closed on timeout/abort.
 //
-// VERTEX_LOCATION precedence: VERTEX_AI_LOCATION (Phase 2 standard) wins over
-// the legacy VERTEX_LOCATION var. Default is europe-west1 because that's where
-// Cloud Run myaura-server runs — co-locating inference keeps latency low and
-// guarantees regional data residency that Belarusian users need.
-const VERTEX_LOCATION = process.env.VERTEX_AI_LOCATION || process.env.VERTEX_LOCATION || 'europe-west1';
+// ─── Regional availability note (Phase 2 hotfix) ────────────────────────────
+// gemini-3.1-flash-image-preview (a.k.a. "nano-banana") is NOT published in
+// europe-west1 — calls there return 403 "Permission denied or model may not
+// exist", which we previously misdiagnosed as an IAM misconfiguration.
+//
+// The canonical region for this model family in the EU is europe-west4
+// (Netherlands). We therefore:
+//   1. Default to europe-west4 when no env var is set.
+//   2. Honour VERTEX_AI_LOCATION (and legacy VERTEX_LOCATION) when it points
+//      at a region we trust.
+//   3. EXPLICITLY REMAP europe-west1 → europe-west4 with a warn-log, because
+//      every current Cloud Run deploy has `VERTEX_AI_LOCATION=europe-west1`
+//      baked in and flipping that env var cleanly requires a redeploy. This
+//      override is the fast path; operators should still update the env var.
+//
+// If we ever need a different region (e.g. us-central1 for a new model), add
+// it to the allow-list below rather than broadening the override.
+const VERTEX_AI_REGION_ALLOWLIST = new Set<string>([
+  'europe-west4', // canonical for gemini-3.1-flash-image-preview (EU)
+  'us-central1',  // canonical fallback (US) — keep handy for emergencies
+]);
+const VERTEX_AI_DEFAULT_REGION = 'europe-west4';
+
+function resolveVertexLocation(): string {
+  const raw = (process.env.VERTEX_AI_LOCATION || process.env.VERTEX_LOCATION || '').trim();
+
+  if (!raw) {
+    console.log(`[ai] VERTEX_AI_LOCATION unset → using default ${VERTEX_AI_DEFAULT_REGION}`);
+    return VERTEX_AI_DEFAULT_REGION;
+  }
+
+  // Legacy env var still set to europe-west1: swap in code to avoid a redeploy
+  // just to flip a string. Warn loudly so operators notice.
+  if (raw === 'europe-west1') {
+    console.warn(
+      `[ai] VERTEX_AI_LOCATION=europe-west1 is overridden to ${VERTEX_AI_DEFAULT_REGION}. ` +
+      `gemini-3.1-flash-image-preview is not available in europe-west1. ` +
+      `Update the env var on Cloud Run to silence this warning.`
+    );
+    return VERTEX_AI_DEFAULT_REGION;
+  }
+
+  if (!VERTEX_AI_REGION_ALLOWLIST.has(raw)) {
+    console.warn(
+      `[ai] VERTEX_AI_LOCATION='${raw}' is not in the allow-list ` +
+      `(${[...VERTEX_AI_REGION_ALLOWLIST].join(', ')}). Falling back to ${VERTEX_AI_DEFAULT_REGION}.`
+    );
+    return VERTEX_AI_DEFAULT_REGION;
+  }
+
+  return raw;
+}
+
+const VERTEX_LOCATION = resolveVertexLocation();
 
 // Project ID for ADC (Application Default Credentials) mode. When Cloud Run
 // runs us without service-account JSON keys in ./keys, we must still tell the
