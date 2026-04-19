@@ -232,11 +232,11 @@ function buildKeyPool(): KeySlot[] {
  * "key exhausted" 24h cooldown on the only ADC slot. That is the Phase 2
  * regression this refactor fixes.
  */
-function createEphemeralClient(slot: KeySlot, signal: AbortSignal): GoogleGenAI {
+function createEphemeralClient(slot: KeySlot, signal: AbortSignal, locationOverride?: string): GoogleGenAI {
   const opts: Record<string, any> = {
     httpOptions: { signal },
     vertexai: true,
-    location: VERTEX_LOCATION,
+    location: locationOverride || VERTEX_LOCATION,
   };
 
   if (slot.keyPath) {
@@ -381,7 +381,7 @@ export class VertexAIProvider implements IGenerationProvider {
     }
   }
 
-  private async _callModel(slot: KeySlot, modelId: string, contents: any[], mode: 'preview' | 'premium'): Promise<string> {
+  private async _callModel(slot: KeySlot, modelId: string, contents: any[], mode: 'preview' | 'premium', locationOverride?: string): Promise<string> {
     const timeoutMs = MODEL_CALL_TIMEOUT_MS[modelId] ?? DEFAULT_CALL_TIMEOUT_MS;
     const timeoutSec = Math.round(timeoutMs / 1000);
 
@@ -393,7 +393,7 @@ export class VertexAIProvider implements IGenerationProvider {
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const client = createEphemeralClient(slot, controller.signal);
+      const client = createEphemeralClient(slot, controller.signal, locationOverride);
 
       const response = await client.models.generateContent({
         model: modelId,
@@ -419,7 +419,7 @@ export class VertexAIProvider implements IGenerationProvider {
     } catch (err: any) {
       clearTimeout(timeoutId);
       // DIAGNOSTIC: Log the exact error payload from Vertex AI
-      console.log(`[Diagnostic] Vertex AI _callModel Error Full Body for ${modelId}:`, JSON.stringify(err, null, 2));
+      console.log(`[Diagnostic] Vertex AI _callModel Error Full Body for ${modelId} in ${locationOverride || VERTEX_LOCATION}:`, JSON.stringify(err, null, 2));
 
       // AbortError = our timeout fired — translate to a recognisable isTimeout error
       if (err?.name === 'AbortError' || controller.signal.aborted) {
@@ -428,6 +428,26 @@ export class VertexAIProvider implements IGenerationProvider {
           { isTimeout: true }
         );
       }
+      throw err;
+    }
+  }
+
+  private async _callModelWithRegionFallback(slot: KeySlot, modelId: string, contents: any[], mode: 'preview' | 'premium'): Promise<string> {
+    try {
+      return await this._callModel(slot, modelId, contents, mode);
+    } catch (err: any) {
+      const errMsg: string = err?.message || "";
+      const errDetails = err?.details || [];
+      const errBlob = [errMsg, stringifyErrorDetails(errDetails), stringifyErrorDetails(err?.error), stringifyErrorDetails(err)].join(" ");
+      const { isModelPermission } = classifyError(err, errMsg, errDetails, errBlob);
+
+      // If we got a 403 on the primary region (e.g. europe-west4), try us-central1 as a last resort
+      // before giving up to the fallback chain.
+      if (isModelPermission && VERTEX_LOCATION !== 'us-central1') {
+        console.warn(`[Region Fallback] 403 denied for ${modelId} in ${VERTEX_LOCATION}. Auto-retrying in us-central1...`);
+        return await this._callModel(slot, modelId, contents, mode, 'us-central1');
+      }
+
       throw err;
     }
   }
@@ -452,7 +472,7 @@ export class VertexAIProvider implements IGenerationProvider {
     console.log(`[Stage1] [Tier: ${tier}] Trying ${primaryModel} (global) | key ...${slot.keyHint}`);
 
     try {
-      const result = await this._callModel(slot, primaryModel, contents, mode);
+      const result = await this._callModelWithRegionFallback(slot, primaryModel, contents, mode);
       console.log(`[Stage1] SUCCESS | [Tier: ${tier}] model=${primaryModel} | key ...${slot.keyHint} | preview: ${result.slice(0, 50)}...`);
       return result;
     } catch (err: any) {
@@ -482,8 +502,8 @@ export class VertexAIProvider implements IGenerationProvider {
       // Fallback attempt
       console.log(`[Stage1] [Tier: ${tier}] Fallback → ${fallbackModel} | key ...${slot.keyHint}`);
       try {
-        const result = await this._callModel(slot, fallbackModel, contents, mode);
-        console.log(`[Stage1] FALLBACK SUCCESS | [Tier: ${tier}] model=${fallbackModel} | key ...${slot.keyHint}`);
+        const result = await this._callModelWithRegionFallback(slot, fallbackModel, contents, mode);
+        console.log(`[Stage1] SUCCESS (Fallback) | [Tier: ${tier}] model=${fallbackModel} | key ...${slot.keyHint}`);
         return result;
       } catch (fallbackErr: any) {
         const fbMsg: string = fallbackErr?.message || "";

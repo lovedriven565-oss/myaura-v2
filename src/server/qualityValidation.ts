@@ -240,16 +240,34 @@ Respond ONLY with valid JSON, no markdown:
   try {
     const project = process.env.GOOGLE_CLOUD_PROJECT;
     const location = process.env.VERTEX_LOCATION || process.env.GOOGLE_CLOUD_LOCATION || 'global';
-    const ai = new GoogleGenAI({ vertexai: true, project, location } as any);
+    let ai = new GoogleGenAI({ vertexai: true, project, location } as any);
 
-    const response = await ai.models.generateContent({
-      model: "gemini-2.0-flash",
-      contents: [
-        { inlineData: { data: referenceBase64, mimeType } },
-        { inlineData: { data: generatedBase64, mimeType } },
-        { text: judgePrompt }
-      ]
-    });
+    let response;
+    try {
+      response = await ai.models.generateContent({
+        model: "gemini-2.0-flash",
+        contents: [
+          { inlineData: { data: referenceBase64, mimeType } },
+          { inlineData: { data: generatedBase64, mimeType } },
+          { text: judgePrompt }
+        ]
+      });
+    } catch (err: any) {
+      if (err?.status === 403 || err?.message?.includes("Permission denied") || err?.message?.includes("may not exist")) {
+        console.warn(`[QualityValidation] 403 denied for gemini-2.0-flash in ${location}. Retrying in us-central1...`);
+        ai = new GoogleGenAI({ vertexai: true, project, location: 'us-central1' } as any);
+        response = await ai.models.generateContent({
+          model: "gemini-2.0-flash",
+          contents: [
+            { inlineData: { data: referenceBase64, mimeType } },
+            { inlineData: { data: generatedBase64, mimeType } },
+            { text: judgePrompt }
+          ]
+        });
+      } else {
+        throw err;
+      }
+    }
 
     const text = response.candidates?.[0]?.content?.parts?.[0]?.text || "";
     const jsonMatch = text.match(/\{[\s\S]*\}/);

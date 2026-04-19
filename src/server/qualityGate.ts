@@ -79,19 +79,22 @@ function buildKeyPool(): KeySlot[] {
   });
 }
 
-function createEphemeralClient(slot: KeySlot, signal: AbortSignal): GoogleGenAI {
+function createEphemeralClient(slot: KeySlot, signal: AbortSignal, locationOverride?: string): GoogleGenAI {
   const opts: Record<string, any> = { httpOptions: { signal } };
 
   if (slot.keyPath) {
     const prev = process.env.GOOGLE_APPLICATION_CREDENTIALS;
     process.env.GOOGLE_APPLICATION_CREDENTIALS = slot.keyPath;
-    Object.assign(opts, { vertexai: true, project: slot.projectId, location: VERTEX_LOCATION });
+    Object.assign(opts, { vertexai: true, project: slot.projectId, location: locationOverride || VERTEX_LOCATION });
     const client = new GoogleGenAI(opts);
     if (prev !== undefined) process.env.GOOGLE_APPLICATION_CREDENTIALS = prev;
     else delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
     return client;
   }
 
+  // Handle ADC correctly
+  const adcProject = process.env.GOOGLE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || '';
+  Object.assign(opts, { vertexai: true, project: adcProject, location: locationOverride || VERTEX_LOCATION });
   return new GoogleGenAI(opts);
 }
 
@@ -204,19 +207,43 @@ Respond ONLY with a JSON object containing exactly these fields:
 
 Use failure tags from this list only: identity_drift, age_drift, plastic_skin, eye_distortion, weak_style_match, low_premium_feel, sad_expression`;
 
-    const response = await client.models.generateContent({
-      model: JUDGE_MODEL,
-      contents: [
-        { inlineData: { data: referenceBase64, mimeType } },
-        { inlineData: { data: generatedBase64, mimeType } },
-        { text: evaluationPrompt }
-      ],
-      config: {
-        temperature: 0.1, // Low temperature for consistent evaluation
-        topP: 0.95,
-        maxOutputTokens: 1024,
-      } as any,
-    });
+    let response;
+    try {
+      response = await client.models.generateContent({
+        model: JUDGE_MODEL,
+        contents: [
+          { inlineData: { data: referenceBase64, mimeType } },
+          { inlineData: { data: generatedBase64, mimeType } },
+          { text: evaluationPrompt }
+        ],
+        config: {
+          temperature: 0.1, // Low temperature for consistent evaluation
+          topP: 0.95,
+          maxOutputTokens: 1024,
+        } as any,
+      });
+    } catch (err: any) {
+      // 403 Fallback logic to us-central1
+      if (err?.status === 403 || err?.message?.includes("Permission denied") || err?.message?.includes("may not exist")) {
+        console.warn(`[QualityGate] 403 denied for ${JUDGE_MODEL} in ${VERTEX_LOCATION}. Retrying in us-central1...`);
+        const fallbackClient = createEphemeralClient(slot, controller.signal, 'us-central1');
+        response = await fallbackClient.models.generateContent({
+          model: JUDGE_MODEL,
+          contents: [
+            { inlineData: { data: referenceBase64, mimeType } },
+            { inlineData: { data: generatedBase64, mimeType } },
+            { text: evaluationPrompt }
+          ],
+          config: {
+            temperature: 0.1,
+            topP: 0.95,
+            maxOutputTokens: 1024,
+          } as any,
+        });
+      } else {
+        throw err;
+      }
+    }
 
     clearTimeout(timeoutId);
 
