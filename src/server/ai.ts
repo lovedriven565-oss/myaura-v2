@@ -80,25 +80,40 @@ async function withExponentialBackoff<T>(
 // KeySlot no longer holds a long-lived client.
 // A fresh GoogleGenAI instance with a disposable AbortController is created
 // per-request so TCP connections are ACTUALLY closed on timeout/abort.
+//
+// VERTEX_LOCATION precedence: VERTEX_AI_LOCATION (Phase 2 standard) wins over
+// the legacy VERTEX_LOCATION var. Default is europe-west1 because that's where
+// Cloud Run myaura-server runs — co-locating inference keeps latency low and
+// guarantees regional data residency that Belarusian users need.
+const VERTEX_LOCATION = process.env.VERTEX_AI_LOCATION || process.env.VERTEX_LOCATION || 'europe-west1';
 
-const VERTEX_LOCATION = process.env.VERTEX_LOCATION || 'global';
+// Project ID for ADC (Application Default Credentials) mode. When Cloud Run
+// runs us without service-account JSON keys in ./keys, we must still tell the
+// SDK which GCP project to bill / hit. The SDK will NOT infer this from ADC
+// alone when vertexai=true — leaving it blank silently falls back to AI Studio.
+const VERTEX_ADC_PROJECT = process.env.GOOGLE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || '';
 
 interface KeySlot {
   keyPath: string;
   projectId: string;   // cached at pool init, avoids repeated JSON reads
   keyHint: string;
   cooldownUntil: number;
+  /** True for the ADC slot. Used to suppress 24h cooldowns that would
+   *  permanently brick the only available slot on a single Cloud Run service
+   *  account — the real fix for those is always an IAM/role change, never a
+   *  time-based retry. */
+  isAdc: boolean;
 }
 
 const KEY_COOLDOWN_MS = 60_000; // cooldown 60s after a 429
 
 function buildKeyPool(): KeySlot[] {
   const keysDir = path.resolve(process.cwd(), 'keys');
-  console.log(`[KeyPool] Scanning ${keysDir}...`);
+  console.log(`[KeyPool] Scanning ${keysDir}... (vertex location=${VERTEX_LOCATION}, adc_project=${VERTEX_ADC_PROJECT || '(unset)'})`);
 
   if (!fs.existsSync(keysDir)) {
     console.warn("[KeyPool] keys folder does not exist — using ADC slot");
-    return [{ keyPath: "", projectId: "", keyHint: "adc", cooldownUntil: 0 }];
+    return [{ keyPath: "", projectId: VERTEX_ADC_PROJECT, keyHint: "adc", cooldownUntil: 0, isAdc: true }];
   }
 
   const files = fs.readdirSync(keysDir);
@@ -106,7 +121,7 @@ function buildKeyPool(): KeySlot[] {
 
   if (jsonFiles.length === 0) {
     console.warn("[KeyPool] No JSON keys found — using ADC slot");
-    return [{ keyPath: "", projectId: "", keyHint: "adc", cooldownUntil: 0 }];
+    return [{ keyPath: "", projectId: VERTEX_ADC_PROJECT, keyHint: "adc", cooldownUntil: 0, isAdc: true }];
   }
 
   console.log(`[KeyPool] Found ${jsonFiles.length} JSON key(s) in ./keys`);
@@ -115,24 +130,33 @@ function buildKeyPool(): KeySlot[] {
     const keyPath = path.join(keysDir, filename);
     const keyContent = JSON.parse(fs.readFileSync(keyPath, 'utf-8'));
     const projectId = keyContent.project_id || 'unknown';
-    return { keyPath, projectId, keyHint: filename.slice(-6), cooldownUntil: 0 };
+    return { keyPath, projectId, keyHint: filename.slice(-6), cooldownUntil: 0, isAdc: false };
   });
 }
 
 /**
  * Creates a fresh GoogleGenAI client bound to a disposable AbortController.
- * Returns both the client and a cleanup function that aborts and closes TCP.
+ *
+ * Both service-account-JSON and ADC paths MUST pass `{ vertexai: true, project,
+ * location }` explicitly. Without those flags @google/genai treats the client
+ * as an AI Studio (Gemini API) client and demands an API key — on Cloud Run
+ * that produces a permanent 403 that was previously misclassified as a
+ * "key exhausted" 24h cooldown on the only ADC slot. That is the Phase 2
+ * regression this refactor fixes.
  */
 function createEphemeralClient(slot: KeySlot, signal: AbortSignal): GoogleGenAI {
   const opts: Record<string, any> = {
     httpOptions: { signal },
+    vertexai: true,
+    location: VERTEX_LOCATION,
   };
 
   if (slot.keyPath) {
-    // Temporarily set GOOGLE_APPLICATION_CREDENTIALS for this client init
+    // Service-account key path: temporarily set GOOGLE_APPLICATION_CREDENTIALS
+    // so the underlying google-auth-library picks it up during token issue.
     const prev = process.env.GOOGLE_APPLICATION_CREDENTIALS;
     process.env.GOOGLE_APPLICATION_CREDENTIALS = slot.keyPath;
-    Object.assign(opts, { vertexai: true, project: slot.projectId, location: VERTEX_LOCATION });
+    opts.project = slot.projectId;
     const client = new GoogleGenAI(opts);
     if (prev !== undefined) {
       process.env.GOOGLE_APPLICATION_CREDENTIALS = prev;
@@ -142,7 +166,16 @@ function createEphemeralClient(slot: KeySlot, signal: AbortSignal): GoogleGenAI 
     return client;
   }
 
-  // ADC fallback (no key file)
+  // ADC path: the SDK will use the Cloud Run service account via metadata
+  // server. We MUST hand it an explicit project — ADC does not always carry a
+  // quota project, and Vertex AI rejects requests without one.
+  if (!VERTEX_ADC_PROJECT) {
+    throw new Error(
+      '[ai] ADC mode requires GOOGLE_PROJECT_ID (or GOOGLE_CLOUD_PROJECT) env var. ' +
+      'Set it to the GCP project that hosts Vertex AI for this service.'
+    );
+  }
+  opts.project = VERTEX_ADC_PROJECT;
   return new GoogleGenAI(opts);
 }
 
@@ -175,6 +208,28 @@ function markKeyCooldown(slot: KeySlot): void {
   slot.cooldownUntil = Date.now() + KEY_COOLDOWN_MS;
   const ready = keyPool.filter(k => k.cooldownUntil <= Date.now()).length;
   console.warn(`[KeyPool] Key ...${slot.keyHint} → cooldown 60s | ${ready}/${keyPool.length} key(s) still ready`);
+}
+
+/**
+ * 24h cooldown is only meaningful for rotatable JSON keys. For ADC there is
+ * nothing to rotate — a 24h cooldown on the single ADC slot is self-inflicted
+ * downtime. For ADC we log loudly and let the caller surface a clear IAM
+ * error; the operator can fix roles and retry immediately instead of waiting.
+ */
+function markKey24hCooldown(slot: KeySlot, reason: string): boolean {
+  if (slot.isAdc) {
+    console.error(
+      `[IAM FATAL] ${reason} on ADC slot — refusing to cool down ADC for 24h. ` +
+      `Root cause is an IAM/config issue, not a quota. Required: ` +
+      `(1) enable aiplatform.googleapis.com in project ${slot.projectId || '(unset)'} ` +
+      `(2) grant 'roles/aiplatform.user' to the Cloud Run service account ` +
+      `(3) verify GOOGLE_PROJECT_ID and VERTEX_AI_LOCATION env vars.`
+    );
+    return false; // caller should NOT set isKeyExhausted
+  }
+  slot.cooldownUntil = Date.now() + 24 * 60 * 60 * 1000;
+  console.error(`[KeyPool] Key ...${slot.keyHint} → 24h cooldown (${reason})`);
+  return true;
 }
 
 /**
@@ -316,8 +371,7 @@ export class VertexAIProvider implements IGenerationProvider {
       const isFetchFailed = errMsg.includes("fetch failed") || errMsg.includes("ECONNRESET") || errMsg.includes("ECONNREFUSED");
 
       if (isBilling) {
-        console.error(`[BILLING ERROR] Key ...${slot.keyHint} → 24h cooldown`);
-        slot.cooldownUntil = Date.now() + 24 * 60 * 60 * 1000;
+        markKey24hCooldown(slot, 'billing disabled');
         throw err;
       } else if (is429) {
         markKeyCooldown(slot);
@@ -343,12 +397,18 @@ export class VertexAIProvider implements IGenerationProvider {
         const fbBlob = [fbMsg, stringifyErrorDetails(fallbackErr?.error), stringifyErrorDetails(fallbackErr)].join(" ");
         const fb = classifyError(fallbackErr, fbMsg, fallbackErr?.details || [], fbBlob);
         if (fb.isBilling) {
-          console.error(`[BILLING ERROR] Key ...${slot.keyHint} (fallback) → 24h cooldown`);
-          slot.cooldownUntil = Date.now() + 24 * 60 * 60 * 1000;
+          markKey24hCooldown(slot, 'billing disabled (fallback)');
         } else if (fb.isModelPermission) {
-          console.error(`[IAM ERROR] Key ...${slot.keyHint}: both ${primaryModel} and ${fallbackModel} denied → 24h cooldown (key unusable)`);
-          slot.cooldownUntil = Date.now() + 24 * 60 * 60 * 1000;
-          throw Object.assign(fallbackErr, { isKeyExhausted: true });
+          const didCool = markKey24hCooldown(
+            slot,
+            `both ${primaryModel} and ${fallbackModel} denied → key unusable`
+          );
+          // Only raise isKeyExhausted for rotatable JSON keys — for ADC the
+          // caller should see the real error so it can be fixed in IAM, not
+          // silently retried on a non-existent next key.
+          if (didCool) {
+            throw Object.assign(fallbackErr, { isKeyExhausted: true });
+          }
         } else if (fb.is429) {
           markKeyCooldown(slot);
         }
