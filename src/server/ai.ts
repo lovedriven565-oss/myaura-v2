@@ -98,6 +98,26 @@ async function withExponentialBackoff<T>(
 // KeySlot no longer holds a long-lived client.
 // A fresh GoogleGenAI instance with a disposable AbortController is created
 // per-request so TCP connections are ACTUALLY closed on timeout/abort.
+
+// DIAGNOSTIC: Fetch actual Cloud Run service account email
+async function printDiagnosticIdentity() {
+  try {
+    const fetch = (await import('node-fetch')).default || globalThis.fetch;
+    const res = await fetch('http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email', {
+      headers: { 'Metadata-Flavor': 'Google' },
+      signal: AbortSignal.timeout(2000)
+    });
+    if (res.ok) {
+      console.log(`[Diagnostic] Active Cloud Run ADC Identity: ${await res.text()}`);
+    } else {
+      console.log(`[Diagnostic] Failed to read metadata server: ${res.status}`);
+    }
+  } catch (e: any) {
+    console.log(`[Diagnostic] Not on Cloud Run or metadata server unreachable (${e.message})`);
+  }
+}
+printDiagnosticIdentity().catch(() => {});
+
 //
 // ─── Regional availability note (Phase 2 hotfix) ────────────────────────────
 // Gemini image-preview models (gemini-3.1-flash-image-preview,
@@ -225,6 +245,7 @@ function createEphemeralClient(slot: KeySlot, signal: AbortSignal): GoogleGenAI 
     const prev = process.env.GOOGLE_APPLICATION_CREDENTIALS;
     process.env.GOOGLE_APPLICATION_CREDENTIALS = slot.keyPath;
     opts.project = slot.projectId;
+    console.log(`[Diagnostic] createEphemeralClient (JSON key ${slot.keyHint}): using project='${opts.project}', location='${opts.location}'`);
     const client = new GoogleGenAI(opts);
     if (prev !== undefined) {
       process.env.GOOGLE_APPLICATION_CREDENTIALS = prev;
@@ -244,6 +265,7 @@ function createEphemeralClient(slot: KeySlot, signal: AbortSignal): GoogleGenAI 
     );
   }
   opts.project = VERTEX_ADC_PROJECT;
+  console.log(`[Diagnostic] createEphemeralClient (ADC): using project='${opts.project}', location='${opts.location}'`);
   return new GoogleGenAI(opts);
 }
 
@@ -378,7 +400,7 @@ export class VertexAIProvider implements IGenerationProvider {
         contents,
         config: {
           // @ts-ignore
-          responseModalities: ["TEXT", "IMAGE"],
+          responseModalities: ["IMAGE"],
           safetySettings: SAFETY_SETTINGS,
           temperature: mode === 'premium' ? 0.2 : 0.4,
           topP: mode === 'premium' ? 0.9 : 0.95,
@@ -396,6 +418,9 @@ export class VertexAIProvider implements IGenerationProvider {
 
     } catch (err: any) {
       clearTimeout(timeoutId);
+      // DIAGNOSTIC: Log the exact error payload from Vertex AI
+      console.log(`[Diagnostic] Vertex AI _callModel Error Full Body for ${modelId}:`, JSON.stringify(err, null, 2));
+
       // AbortError = our timeout fired — translate to a recognisable isTimeout error
       if (err?.name === 'AbortError' || controller.signal.aborted) {
         throw Object.assign(
