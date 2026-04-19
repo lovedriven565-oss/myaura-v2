@@ -1,11 +1,57 @@
-import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import {
+  S3Client,
+  PutObjectCommand,
+  DeleteObjectCommand,
+  GetObjectCommand,
+  HeadObjectCommand,
+  ListObjectsV2Command,
+} from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { v4 as uuidv4 } from "uuid";
 import path from "path";
+
+export interface PresignedUploadSlot {
+  /** Final R2 object key (e.g. "uploads/123456/<uuid>.jpg") */
+  key: string;
+  /** Presigned URL the client must PUT the file body to */
+  url: string;
+  /** Required headers the client MUST send on the PUT — the signature covers them */
+  headers: Record<string, string>;
+  /** Unix timestamp (ms) when the URL stops being valid */
+  expiresAt: number;
+}
+
+export interface ObjectMetadata {
+  exists: boolean;
+  size: number | null;
+  contentType: string | null;
+  lastModified: Date | null;
+}
 
 export interface IStorage {
   save(fileBuffer: Buffer, originalName: string, type: "original" | "result"): Promise<string>;
   delete(filepath: string): Promise<void>;
   get(filepath: string): Promise<Buffer | null>;
+  /**
+   * Mint a presigned PUT URL. The signature locks Content-Type and
+   * Content-Length, so the client cannot upload a different MIME or a
+   * file that exceeds the declared size.
+   */
+  presignPut(key: string, contentType: string, contentLength: number, ttlSec: number): Promise<PresignedUploadSlot>;
+  /**
+   * Read object metadata without downloading the body. Used to verify
+   * the client actually uploaded the file and it matches the declared
+   * size/type before we kick off generation.
+   */
+  headObject(key: string): Promise<ObjectMetadata>;
+  /**
+   * List keys under a prefix (used by retention cron to find orphaned uploads).
+   * Returns at most `maxKeys` entries per call.
+   */
+  listByPrefix(prefix: string, maxKeys?: number, continuationToken?: string): Promise<{
+    keys: { key: string; lastModified: Date | null; size: number }[];
+    nextContinuationToken: string | null;
+  }>;
 }
 
 export class R2Storage implements IStorage {
@@ -120,6 +166,93 @@ export class R2Storage implements IStorage {
       console.error(`Failed to get ${filename} from R2:`, e);
       return null;
     }
+  }
+
+  async presignPut(
+    key: string,
+    contentType: string,
+    contentLength: number,
+    ttlSec: number
+  ): Promise<PresignedUploadSlot> {
+    // Bind Content-Type AND Content-Length into the signature so the client
+    // cannot swap the MIME or upload a larger file than was declared. If the
+    // PUT headers do not match exactly, R2 rejects with 403 SignatureDoesNotMatch.
+    const command = new PutObjectCommand({
+      Bucket: this.bucketName,
+      Key: key,
+      ContentType: contentType,
+      ContentLength: contentLength,
+    });
+
+    const url = await getSignedUrl(this.s3, command, {
+      expiresIn: ttlSec,
+      // Both headers MUST be in the signed list — otherwise R2 ignores them on PUT
+      // and the size/type enforcement is defeated.
+      signableHeaders: new Set(["content-type", "content-length"]),
+    });
+
+    return {
+      key,
+      url,
+      headers: {
+        "Content-Type": contentType,
+        "Content-Length": String(contentLength),
+      },
+      expiresAt: Date.now() + ttlSec * 1000,
+    };
+  }
+
+  async headObject(key: string): Promise<ObjectMetadata> {
+    try {
+      const response = await this.s3.send(
+        new HeadObjectCommand({ Bucket: this.bucketName, Key: key })
+      );
+      return {
+        exists: true,
+        size: response.ContentLength ?? null,
+        contentType: response.ContentType ?? null,
+        lastModified: response.LastModified ?? null,
+      };
+    } catch (e: any) {
+      // R2 returns 404 NotFound / NoSuchKey for missing objects; surface as exists=false
+      const status = e?.$metadata?.httpStatusCode;
+      if (status === 404 || e?.name === "NotFound" || e?.name === "NoSuchKey") {
+        return { exists: false, size: null, contentType: null, lastModified: null };
+      }
+      console.error(`[R2] headObject unexpected error for ${key}:`, e?.message || e);
+      throw e;
+    }
+  }
+
+  async listByPrefix(
+    prefix: string,
+    maxKeys: number = 1000,
+    continuationToken?: string
+  ): Promise<{
+    keys: { key: string; lastModified: Date | null; size: number }[];
+    nextContinuationToken: string | null;
+  }> {
+    const response = await this.s3.send(
+      new ListObjectsV2Command({
+        Bucket: this.bucketName,
+        Prefix: prefix,
+        MaxKeys: maxKeys,
+        ContinuationToken: continuationToken,
+      })
+    );
+
+    const keys = (response.Contents || [])
+      .filter(obj => obj.Key)
+      .map(obj => ({
+        key: obj.Key!,
+        lastModified: obj.LastModified ?? null,
+        size: obj.Size ?? 0,
+      }));
+
+    return {
+      keys,
+      nextContinuationToken: response.IsTruncated ? response.NextContinuationToken ?? null : null,
+    };
   }
 }
 
