@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { Camera, X, Sparkles, Sun, Wand2, Wallet } from "lucide-react";
 import { apiFetch } from "../lib/api";
+import { requestUploadUrls, uploadFilesToR2 } from "../lib/uploadToR2";
 
 // Detect Telegram Mini App IDs for delivery
 function getTelegramIds(): { chatId: string | null; userId: string | null } {
@@ -23,68 +24,6 @@ function getTelegramIds(): { chatId: string | null; userId: string | null } {
 const FREE_V2 = import.meta.env.VITE_FREE_MULTI_REF_V2_ENABLED === "true";
 const FREE_MAX_PHOTOS = FREE_V2 ? 5 : 1;
 
-// Image compression utility: resize to max 1024px, JPEG quality 0.8, target ~300-700KB
-async function compressImage(file: File): Promise<File> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    const url = URL.createObjectURL(file);
-    
-    img.onload = () => {
-      URL.revokeObjectURL(url);
-      
-      // Calculate new dimensions (max 1024px)
-      let { width, height } = img;
-      const maxDim = 1024;
-      if (width > maxDim || height > maxDim) {
-        if (width > height) {
-          height = Math.round((height * maxDim) / width);
-          width = maxDim;
-        } else {
-          width = Math.round((width * maxDim) / height);
-          height = maxDim;
-        }
-      }
-      
-      // Create canvas and draw resized image
-      const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) {
-        reject(new Error('Failed to get canvas context'));
-        return;
-      }
-      ctx.drawImage(img, 0, 0, width, height);
-      
-      // Export as JPEG with quality 0.8
-      canvas.toBlob(
-        (blob) => {
-          if (!blob) {
-            reject(new Error('Canvas toBlob failed'));
-            return;
-          }
-          // Create new File from blob
-          const compressedFile = new File([blob], file.name, {
-            type: 'image/jpeg',
-            lastModified: Date.now()
-          });
-          console.log(`[Compress] ${file.name}: ${(file.size / 1024).toFixed(1)}KB → ${(compressedFile.size / 1024).toFixed(1)}KB (${width}x${height})`);
-          resolve(compressedFile);
-        },
-        'image/jpeg',
-        0.8
-      );
-    };
-    
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error(`Failed to load image: ${file.name}`));
-    };
-    
-    img.src = url;
-  });
-}
-
 export default function UploadFree() {
   const [files, setFiles] = useState<File[]>([]);
   const [loading, setLoading] = useState(false);
@@ -96,6 +35,11 @@ export default function UploadFree() {
   const [gender, setGender] = useState<"male" | "female" | "unset">("unset");
   const [balanceLoading, setBalanceLoading] = useState(true);
   const [debugInfo, setDebugInfo] = useState<string>("");
+  // Two-phase progress during upload:
+  //   uploadPhase='uploading' → showing per-file PUT progress to R2
+  //   uploadPhase='starting'  → POST /api/generate roundtrip (no byte progress)
+  const [uploadPhase, setUploadPhase] = useState<null | "uploading" | "starting">(null);
+  const [uploadPct, setUploadPct] = useState<number>(0);
   const navigate = useNavigate();
   const { userId: tgUserId } = getTelegramIds();
 
@@ -177,6 +121,8 @@ export default function UploadFree() {
 
     setLoading(true);
     setError("");
+    setUploadPhase(null);
+    setUploadPct(0);
 
     const { chatId, userId } = getTelegramIds();
 
@@ -185,37 +131,49 @@ export default function UploadFree() {
       setLoading(false);
       return;
     }
-    
-    // Compress all images before sending
-    console.log(`[UploadFree] Compressing ${files.length} images...`);
-    let compressedFiles: File[];
+
+    // Phase 2 upload flow:
+    //   1) Mint presigned URLs on the backend.
+    //   2) PUT originals directly to R2 (browser → R2, never through our server).
+    //   3) POST only the resulting R2 keys to /api/generate.
+    let imageKeys: string[];
     try {
-      compressedFiles = await Promise.all(files.map(f => compressImage(f)));
-      const originalSize = files.reduce((sum, f) => sum + f.size, 0);
-      const compressedSize = compressedFiles.reduce((sum, f) => sum + f.size, 0);
-      console.log(`[UploadFree] Total: ${(originalSize / 1024 / 1024).toFixed(2)}MB → ${(compressedSize / 1024 / 1024).toFixed(2)}MB`);
-    } catch (compressErr: any) {
-      console.error("[UploadFree] Compression failed:", compressErr);
-      setError("Ошибка при обработке фото: " + compressErr.message);
+      setUploadPhase("uploading");
+      setDebugInfo(`Загрузка ${files.length} фото в облако...`);
+      const slots = await requestUploadUrls({ files, packageId: "free" });
+      imageKeys = await uploadFilesToR2(files, slots, (progress) => {
+        // Aggregate byte progress across all files into a single 0-100% number.
+        const loaded = progress.reduce((s, p) => s + p.loaded, 0);
+        const total = progress.reduce((s, p) => s + p.total, 0) || 1;
+        setUploadPct(Math.round((loaded / total) * 100));
+      });
+      console.log(`[UploadFree] Uploaded ${imageKeys.length} files to R2`);
+    } catch (uploadErr: any) {
+      console.error("[UploadFree] R2 upload failed:", uploadErr);
+      const msg = uploadErr?.details?.error || uploadErr?.message || "Не удалось загрузить фото";
+      setError("Ошибка загрузки: " + msg);
       setLoading(false);
+      setUploadPhase(null);
       return;
     }
-    
-    const formData = new FormData();
-    compressedFiles.forEach(f => formData.append("images", f));
-    formData.append("packageId", "free");
-    formData.append("mode", "preview");
-    formData.append("styleIds", JSON.stringify(["business"]));
-    formData.append("ageTier", ageTier);
-    formData.append("gender", gender);
-    formData.append("telegramUserId", userId);
-    if (chatId) formData.append("telegramChatId", chatId);
 
     try {
+      setUploadPhase("starting");
+      setDebugInfo("Запуск генерации...");
       console.log("[UploadFree] Sending to /api/generate...");
       const res = await apiFetch("/api/generate", {
         method: "POST",
-        body: formData,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          packageId: "free",
+          mode: "preview",
+          styleIds: ["business"],
+          ageTier,
+          gender,
+          telegramUserId: userId,
+          ...(chatId ? { telegramChatId: chatId } : {}),
+          imageKeys,
+        }),
       });
       console.log("[UploadFree] Response status:", res.status, res.statusText);
       
@@ -267,6 +225,7 @@ export default function UploadFree() {
     } catch (err: any) {
       setError(err.message || "Произошла ошибка. Попробуйте ещё раз.");
       setLoading(false);
+      setUploadPhase(null);
     }
   };
 
@@ -465,7 +424,13 @@ export default function UploadFree() {
             className="w-full h-14 bg-white/10 hover:bg-white/15 border border-white/10 text-white font-medium text-[15px] rounded-2xl transition-all active:scale-[0.98] flex items-center justify-center gap-2 disabled:opacity-50"
           >
             {loading ? (
-              <span>Генерация...</span>
+              <span>
+                {uploadPhase === "uploading"
+                  ? `Загрузка ${uploadPct}%...`
+                  : uploadPhase === "starting"
+                  ? "Запуск генерации..."
+                  : "Генерация..."}
+              </span>
             ) : canGenerate ? (
               <>
                 <span>Создать бесплатно</span>

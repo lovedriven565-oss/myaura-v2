@@ -6,6 +6,8 @@ import { Camera, X, Sparkles, Star, Check, Crown, Image as ImageIcon, ShieldChec
 
 import { apiFetch } from "../lib/api";
 
+import { requestUploadUrls, uploadFilesToR2 } from "../lib/uploadToR2";
+
 
 
 // Detect Telegram Mini App IDs for delivery
@@ -38,68 +40,6 @@ function getTelegramIds(): { chatId: string | null; userId: string | null } {
 
   }
 
-}
-
-// Image compression utility: resize to max 1024px, JPEG quality 0.8, target ~300-700KB
-async function compressImage(file: File): Promise<File> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    const url = URL.createObjectURL(file);
-    
-    img.onload = () => {
-      URL.revokeObjectURL(url);
-      
-      // Calculate new dimensions (max 1024px)
-      let { width, height } = img;
-      const maxDim = 1024;
-      if (width > maxDim || height > maxDim) {
-        if (width > height) {
-          height = Math.round((height * maxDim) / width);
-          width = maxDim;
-        } else {
-          width = Math.round((width * maxDim) / height);
-          height = maxDim;
-        }
-      }
-      
-      // Create canvas and draw resized image
-      const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) {
-        reject(new Error('Failed to get canvas context'));
-        return;
-      }
-      ctx.drawImage(img, 0, 0, width, height);
-      
-      // Export as JPEG with quality 0.8
-      canvas.toBlob(
-        (blob) => {
-          if (!blob) {
-            reject(new Error('Canvas toBlob failed'));
-            return;
-          }
-          // Create new File from blob
-          const compressedFile = new File([blob], file.name, {
-            type: 'image/jpeg',
-            lastModified: Date.now()
-          });
-          console.log(`[Compress] ${file.name}: ${(file.size / 1024).toFixed(1)}KB → ${(compressedFile.size / 1024).toFixed(1)}KB (${width}x${height})`);
-          resolve(compressedFile);
-        },
-        'image/jpeg',
-        0.8
-      );
-    };
-    
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error(`Failed to load image: ${file.name}`));
-    };
-    
-    img.src = url;
-  });
 }
 
 interface CatalogPkg {
@@ -155,6 +95,10 @@ export default function UploadPremium() {
   const [paidCredits, setPaidCredits] = useState(0);
 
   const [balanceLoading, setBalanceLoading] = useState(true);
+
+  // Phase 2 direct-to-R2 upload progress
+  const [uploadPhase, setUploadPhase] = useState<null | "uploading" | "starting">(null);
+  const [uploadPct, setUploadPct] = useState<number>(0);
 
   const [catalog, setCatalog] = useState<CatalogPkg[]>([]);
 
@@ -357,6 +301,8 @@ export default function UploadPremium() {
 
       setLoading(true);
       setError("");
+      setUploadPhase(null);
+      setUploadPct(0);
 
       const { chatId, userId } = getTelegramIds();
 
@@ -366,60 +312,55 @@ export default function UploadPremium() {
         return;
       }
 
-      // DEBUG: Log before FormData construction
-      console.log("[GEN DEBUG] Building FormData...", { 
-        filesCount: files.length, 
-        confirmedPackageId, 
-        selectedStyle, 
-        ageTier, 
-        gender, 
-        userId, 
-        chatId 
+      console.log("[GEN] Starting R2 upload flow", {
+        filesCount: files.length,
+        confirmedPackageId,
+        selectedStyle,
+        ageTier,
+        gender,
       });
 
-      // Compress all images before sending (resize to 1024px, JPEG quality 0.8)
-      console.log(`[GEN DEBUG] Compressing ${files.length} images...`);
-      let compressedFiles: File[];
+      // Phase 2 direct-to-R2 upload:
+      //   1) /api/upload-urls mints presigned PUT URLs (one per file).
+      //   2) Browser PUTs originals directly to R2 — no canvas compression,
+      //      no multipart payload through Cloud Run (bypassing the 32 MB limit).
+      //   3) /api/generate receives only the resulting R2 object keys.
+      let imageKeys: string[];
       try {
-        compressedFiles = await Promise.all(files.map(f => compressImage(f)));
-        const originalSize = files.reduce((sum, f) => sum + f.size, 0);
-        const compressedSize = compressedFiles.reduce((sum, f) => sum + f.size, 0);
-        console.log(`[GEN DEBUG] Total size: ${(originalSize / 1024 / 1024).toFixed(2)}MB → ${(compressedSize / 1024 / 1024).toFixed(2)}MB`);
-      } catch (compressErr: any) {
-        console.error("[GEN DEBUG] Compression failed:", compressErr);
-        alert("Compression error: " + compressErr.message);
-        setError("Ошибка при обработке фото: " + compressErr.message);
+        setUploadPhase("uploading");
+        const slots = await requestUploadUrls({
+          files,
+          packageId: confirmedPackageId as "starter" | "pro" | "max",
+        });
+        imageKeys = await uploadFilesToR2(files, slots, (progress) => {
+          const loaded = progress.reduce((s, p) => s + p.loaded, 0);
+          const total = progress.reduce((s, p) => s + p.total, 0) || 1;
+          setUploadPct(Math.round((loaded / total) * 100));
+        });
+        console.log(`[GEN] Uploaded ${imageKeys.length} files to R2`);
+      } catch (uploadErr: any) {
+        console.error("[GEN] R2 upload failed:", uploadErr);
+        const msg = uploadErr?.details?.error || uploadErr?.message || "Не удалось загрузить фото";
+        setError("Ошибка загрузки: " + msg);
         setLoading(false);
+        setUploadPhase(null);
         return;
       }
 
-      const formData = new FormData();
-      
-      // Append compressed files
-      compressedFiles.forEach((file, idx) => {
-        console.log(`[GEN DEBUG] Appending file ${idx}:`, file.name, file.type, file.size);
-        formData.append("images", file);
-      });
-
-      // Append other fields
-      formData.append("packageId", confirmedPackageId);
-      formData.append("mode", "premium");
-      
-      // CRITICAL FIX: Ensure styleIds is properly stringified
-      const styleIdsJson = JSON.stringify([selectedStyle]);
-      console.log("[GEN DEBUG] styleIds JSON:", styleIdsJson);
-      formData.append("styleIds", styleIdsJson);
-      
-      formData.append("ageTier", ageTier);
-      formData.append("gender", gender);
-      formData.append("telegramUserId", userId);
-      if (chatId) formData.append("telegramChatId", chatId);
-
-      console.log("[GEN DEBUG] FormData constructed, sending request...");
-
+      setUploadPhase("starting");
       const res = await apiFetch("/api/generate", {
         method: "POST",
-        body: formData,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          packageId: confirmedPackageId,
+          mode: "premium",
+          styleIds: [selectedStyle],
+          ageTier,
+          gender,
+          telegramUserId: userId,
+          ...(chatId ? { telegramChatId: chatId } : {}),
+          imageKeys,
+        }),
       });
 
       console.log("[GEN DEBUG] Response received:", res.status, res.statusText);
@@ -465,6 +406,7 @@ export default function UploadPremium() {
       
       setError(err?.message || "Произошла ошибка. Попробуйте ещё раз.");
       setLoading(false);
+      setUploadPhase(null);
     }
   };
 
@@ -844,7 +786,13 @@ export default function UploadPremium() {
 
             {loading ? (
 
-              <span>Генерация...</span>
+              <span>
+                {uploadPhase === "uploading"
+                  ? `Загрузка ${uploadPct}%...`
+                  : uploadPhase === "starting"
+                  ? "Запуск генерации..."
+                  : "Генерация..."}
+              </span>
 
             ) : canGenerate && confirmedPkg ? (
 
