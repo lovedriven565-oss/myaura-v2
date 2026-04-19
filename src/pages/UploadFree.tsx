@@ -140,7 +140,7 @@ export default function UploadFree() {
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
-      const newFiles = Array.from(e.target.files);
+      const newFiles: File[] = Array.from(e.target.files);
       console.log('[UploadFree] Selected files:', newFiles.length, 'names:', newFiles.map(f => f.name));
       const merged = [...files, ...newFiles].slice(0, FREE_MAX_PHOTOS);
       console.log('[UploadFree] Total files after merge:', merged.length);

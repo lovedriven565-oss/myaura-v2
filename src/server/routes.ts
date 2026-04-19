@@ -10,6 +10,8 @@ import { deliverTelegramPhoto, deliverTelegramResults, notifyReferralAwarded } f
 import { selectBestReferencePhotos } from "./inputCuration.js";
 import { evaluateGeneratedPhoto, clearRerollTracking } from "./qualityGate.js";
 import { enqueueGeneration, refundCredit, markCreditConsumed, checkRateLimit } from "./dbQueue.js";
+import { updateGenerationHeartbeat } from "./watchdog.js";
+import { z } from "zod";
 import crypto from "crypto";
 
 export const apiRouter = Router();
@@ -182,7 +184,10 @@ function initDataAuthMiddleware(req: any, res: any, next: any) {
     || req.headers["x-telegram-init-data"]
     || req.headers["X-Telegram-Init-Data"];
 
-  const isStrict = process.env.INIT_DATA_STRICT === "true";
+  // HARD-ENFORCE strict mode in production, regardless of env var.
+  // Dev only gets the bypass — production NEVER trusts unsigned identity.
+  const isProd = process.env.NODE_ENV === "production";
+  const isStrict = isProd || process.env.INIT_DATA_STRICT === "true";
 
   if (!initData) {
     // Allow requests without initData for non-Telegram clients (dev/testing)
@@ -408,6 +413,41 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 
 
 const ALLOWED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]);
 
+// ─── Zod schema for POST /api/generate ──────────────────────────────────────
+// Validates every field with a single source of truth. Any field that fails
+// returns 400 with the exact path + reason, so the frontend (or us, debugging)
+// knows precisely what broke.
+//
+// Note on styleIds: the frontend sends JSON.stringify(["business"]) in a
+// multipart/form-data field, so we accept either a JSON-encoded string or an
+// already-parsed array and normalise to string[] via z.preprocess.
+const StyleIdEnum = z.enum(["business", "lifestyle", "aura", "cinematic", "luxury", "editorial"]);
+
+const GenerateBodySchema = z.object({
+  packageId: z.enum(["free", "starter", "pro", "max"]),
+  mode: z.enum(["preview", "premium"]),
+  styleIds: z.preprocess(
+    (raw) => {
+      if (Array.isArray(raw)) return raw;
+      if (typeof raw === "string") {
+        const trimmed = raw.trim();
+        if (trimmed.startsWith("[")) {
+          try { return JSON.parse(trimmed); } catch { return [trimmed]; }
+        }
+        return [trimmed];
+      }
+      return raw;
+    },
+    z.array(StyleIdEnum).min(1, "At least one style is required").max(6)
+  ),
+  ageTier: z.enum(["young", "mature", "distinguished"]).default("young"),
+  gender: z.enum(["male", "female", "unset"]).default("unset"),
+  telegramUserId: z.coerce.number().int().positive(),
+  telegramChatId: z.coerce.number().int().optional(),
+});
+
+export type GenerateBody = z.infer<typeof GenerateBodySchema>;
+
 // Validate file is a real image by checking magic bytes
 function isValidImageBuffer(buf: Buffer, declaredMime: string): boolean {
   if (!ALLOWED_IMAGE_MIMES.has(declaredMime)) return false;
@@ -429,48 +469,54 @@ apiRouter.post("/generate",
   upload.fields([{ name: "images", maxCount: 15 }]),
   async (req, res, next) => {
     try {
-      // Fix: Parse styleIds from string BEFORE any validation
-      if (req.body.styleIds && typeof req.body.styleIds === 'string') {
-        try {
-          req.body.styleIds = JSON.parse(req.body.styleIds);
-        } catch (e) {
-          req.body.styleIds = [req.body.styleIds];
-        }
-      }
-
       console.log('[Generate] Request received:', {
-        body: req.body,
+        body: { ...req.body, initData: req.body?.initData ? '<redacted>' : undefined },
         files: req.files ? 'present' : 'missing',
-        contentType: req.headers['content-type']
+        contentType: req.headers['content-type'],
       });
-      
-      // SAFETY CHECK: Handle both single file and multiple files
-      const imageFiles = (req.files as { [fieldname: string]: Express.Multer.File[] })?.images;
-      
-      if (!imageFiles || imageFiles.length === 0) {
-        return res.status(400).json({ 
-          error: "No image files provided. Please upload at least one image.", 
-          code: "NO_FILES" 
+
+      // ── Zod validation: single source of truth for every field ──
+      const parseResult = GenerateBodySchema.safeParse(req.body);
+      if (!parseResult.success) {
+        // Build a human-readable list of which fields failed and why.
+        // This is the difference between "400 Bad Request" and actionable debug info.
+        const details = parseResult.error.issues.map(issue => ({
+          path: issue.path.join(".") || "(root)",
+          code: issue.code,
+          message: issue.message,
+        }));
+        const summary = details.map(d => `${d.path}: ${d.message}`).join("; ");
+        console.warn(`[Generate] Zod validation failed: ${summary}`);
+        return res.status(400).json({
+          error: `Validation failed: ${summary}`,
+          code: "VALIDATION_FAILED",
+          details,
         });
       }
-      
-      // Validate images
+      const body = parseResult.data;
+
+      // ── File presence + magic-byte validation ──
+      const imageFiles = (req.files as { [fieldname: string]: Express.Multer.File[] })?.images;
+      if (!imageFiles || imageFiles.length === 0) {
+        return res.status(400).json({
+          error: "No image files provided. Please upload at least one image.",
+          code: "NO_FILES",
+        });
+      }
+
       for (const file of imageFiles) {
         if (!isValidImageBuffer(file.buffer, file.mimetype)) {
-          return res.status(400).json({ 
-            error: `Invalid image file: ${file.originalname}. Supported formats: JPEG, PNG, WebP, HEIC.`, 
-            code: "INVALID_IMAGE" 
+          return res.status(400).json({
+            error: `Invalid image file: ${file.originalname}. Supported formats: JPEG, PNG, WebP, HEIC.`,
+            code: "INVALID_IMAGE",
           });
         }
       }
 
-    const packageId = req.body.packageId || "free";
-    
-    // Extract styleIds (now guaranteed to be an array if present)
-    const styleIds: string[] = Array.isArray(req.body.styleIds) ? req.body.styleIds : 
-                               req.body.styleIds ? [req.body.styleIds] : [];
+    const packageId = body.packageId;
+    const styleIds: string[] = body.styleIds;
 
-    // Validate using packages logic
+    // Validate package-specific constraints (ref count, max styles)
     const validation = validatePackageInput(packageId, imageFiles.length, styleIds);
     if (!validation.ok || !validation.config) {
       return res.status(400).json({ error: validation.error, code: validation.code });
@@ -480,7 +526,7 @@ apiRouter.post("/generate",
     const id = uuidv4();
     // outputCount is always server-authoritative from package config — never trusted from client
     const outputCount = config.outputCount;
-    console.log(`[${id}] New generation request: packageId=${packageId}, mode=${req.body.mode}, outputCount=${outputCount}, files=${imageFiles.length}, styles=${styleIds}`);
+    console.log(`[${id}] New generation request: packageId=${packageId}, mode=${body.mode}, outputCount=${outputCount}, files=${imageFiles.length}, styles=${styleIds}`);
 
     // Save originals
     const originalPaths: string[] = [];
@@ -495,43 +541,19 @@ apiRouter.post("/generate",
     const expiresAt = new Date(Date.now() + retentionMinutes * 60000).toISOString();
 
     const db = getDb();
-    
-    // Check if this was triggered from Telegram
-    let telegramChatId: number | null = null;
-    let telegramUserId: number | null = null;
-    
-    // Try to get explicit chat_id (attachment menu context)
-    if (req.body.telegramChatId) {
-      const parsed = parseInt(req.body.telegramChatId, 10);
-      telegramChatId = isNaN(parsed) ? null : parsed;
-    }
-    
-    // Always get user_id from Telegram SDK
-    if (req.body.telegramUserId) {
-      const parsed = parseInt(req.body.telegramUserId, 10);
-      telegramUserId = isNaN(parsed) ? null : parsed;
-    }
 
-    // STRICT: Block generation if no Telegram user ID
-    if (!telegramUserId) {
-      return res.status(401).json({ error: "Telegram user ID is required", code: "NO_USER_ID" });
-    }
-    
+    // Telegram context from validated body (already coerced to numbers by Zod)
+    const telegramUserId: number = body.telegramUserId;
+    const telegramChatId: number | null = body.telegramChatId ?? null;
+
     console.log(`Generation ${id}: telegram context - chatId=${telegramChatId}, userId=${telegramUserId}`);
 
     // ─── Strict Credits Consumption: 1 photo = 1 credit ───────────────
     // mode: 'premium' = only paid_credits; 'preview' = free first, then paid
-    const mode: "premium" | "preview" = (req.body.mode === "premium") ? "premium" : "preview";
-
-    // Age tier for adaptive skin & lighting prompts
-    const validAgeTiers = ["young", "mature", "distinguished"];
-    const ageTier: AgeTier = validAgeTiers.includes(req.body.ageTier) ? req.body.ageTier as AgeTier : "young";
-    console.log(`[${id}] ageTier=${ageTier}`);
-
-    // Gender for Optical Bypass & Asymmetry Anchor identity lock selection
-    const validGenders = ["male", "female", "unset"];
-    const gender: Gender = validGenders.includes(req.body.gender) ? req.body.gender as Gender : "unset";
-    console.log(`[${id}] gender=${gender}`);
+    const mode: "premium" | "preview" = body.mode;
+    const ageTier: AgeTier = body.ageTier;
+    const gender: Gender = body.gender;
+    console.log(`[${id}] ageTier=${ageTier} gender=${gender} mode=${mode}`);
 
     // ── Free V2: quality-gate BEFORE credit consumption ──────────────
     const FREE_V2 = process.env.FREE_MULTI_REF_V2_ENABLED === "true";
@@ -741,15 +763,22 @@ apiRouter.post("/generate",
           console.error(`╚${"═".repeat(50)}╝`);
         }
 
-        // Chain DB updates sequentially to avoid race conditions
+        // Chain DB updates sequentially to avoid race conditions.
+        // Also bump last_heartbeat_at so the watchdog does not reclaim
+        // a legitimately-long-running batch (e.g. Max package, 60 images).
         dbUpdateChain = dbUpdateChain.then(() =>
           db.from("generations").update({
             results_completed: completedCount,
             results_failed: failedCount,
             result_path: successPaths[0] || null,
             result_paths: [...successPaths],
+            last_heartbeat_at: new Date().toISOString(),
           }).eq("id", id).then(() => {})
         ).catch(err => console.error("Progressive DB update error:", err));
+
+        // Fire-and-forget explicit RPC heartbeat (cheaper than a full UPDATE,
+        // and serves as a backup in case the chained UPDATE above is queued).
+        updateGenerationHeartbeat(id).catch(() => { /* already logged inside */ });
       };
 
       // Run generation using env-configured concurrency and delay (PREMIUM_CONCURRENCY, INTER_REQUEST_DELAY_MS)
@@ -866,7 +895,14 @@ apiRouter.post("/generate",
         }
       }
     }
-  } catch (error) {
+  } catch (error: any) {
+    // Guard against "Cannot set headers after they are sent" — we already
+    // sent { id, status: "processing" } before background work started, so
+    // any late error here must only be logged, never passed to next().
+    if (res.headersSent) {
+      console.error("[Generate] Post-response error (headers already sent):", error?.message || error);
+      return;
+    }
     next(error);
   }
 });

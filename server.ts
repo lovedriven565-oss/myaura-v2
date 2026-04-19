@@ -10,6 +10,7 @@ import { initDb } from "./src/server/db.js";
 import { startRetentionCron } from "./src/server/retention.js";
 import { apiRouter, telegramWebhookHandler } from "./src/server/routes.js";
 import { initTelegramBot } from "./src/server/telegram.js";
+import { startWatchdogCron } from "./src/server/watchdog.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -60,6 +61,7 @@ async function startServer() {
   // Initialize DB, Storage and Telegram Bot (fail-fast on misconfig)
   initDb();
   startRetentionCron();
+  startWatchdogCron();
   if (process.env.ENABLE_TELEGRAM_BOT !== "false") {
     initTelegramBot();
   }
@@ -88,6 +90,14 @@ async function startServer() {
   // API Routes
   app.use("/api", apiRouter);
 
+  // API 404 handler — MUST come before the SPA catch-all, otherwise unknown
+  // /api/* paths in production fall through to index.html and the client
+  // receives HTML where it expects JSON ("Unexpected token '<'").
+  app.use("/api", (req, res) => {
+    console.log(`[404 API] ${req.method} ${req.path} not found`);
+    res.status(404).json({ error: "API endpoint not found", path: req.path, code: "NOT_FOUND" });
+  });
+
   if (!isProd) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -111,12 +121,6 @@ async function startServer() {
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
-
-  // 404 handler for API routes - MUST return JSON, not HTML
-  app.use("/api", (req, res) => {
-    console.log(`[404 API] ${req.method} ${req.path} not found`);
-    res.status(404).json({ error: "API endpoint not found", path: req.path });
-  });
 
   // Global Error Handler (JSON responses). Leaks only the top-level message
   // in production — stack/details stay in server logs.
