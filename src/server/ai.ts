@@ -7,29 +7,27 @@ export interface IGenerationProvider {
 }
 
 // ─── MyAURA Model Stack (Vertex AI) ─────────────────────────────────────────
-// IMPORTANT (Phase 2 hotfix):
-//   The previous defaults — "gemini-3.1-flash-image-preview" and
-//   "gemini-3-pro-image-preview" — do NOT exist on Vertex AI. Any call using
-//   those IDs returns a 403 "Permission denied or model may not exist"
-//   regardless of IAM or region. The publicly-published image-capable Gemini
-//   on Vertex AI is "gemini-2.5-flash-image-preview" (a.k.a. Nano Banana),
-//   available in europe-west4 and us-central1.
+// Confirmed via Vertex AI Model Garden screenshot (2026-04-20): the IDs
+// "gemini-3.1-flash-image-preview" and "gemini-3-pro-image-preview" DO exist
+// on Vertex AI. The 403 "may not exist" wording from the API is misleading —
+// it fires for any combination of (model unavailable in region, project not
+// allow-listed, missing IAM). The right region (europe-west4, see below)
+// plus roles/aiplatform.user on the Cloud Run SA is what unlocks these.
 //
-// Why Gemini and not Imagen:
-//   Our payload is multimodal `generateContent` with `contents: [inlineData...,
-//   text]` — reference photo + prompt in one shot. That is native Gemini
-//   image input. Imagen-3 uses a different SDK surface (`generateImages`),
-//   different payload shape, and a separate subject-customization model
-//   (imagen-3.0-capability-001). Migrating to Imagen would require rewriting
-//   `_callModel`, the fallback chain, and the QualityGate. We stay on Gemini.
+// Model assignment:
+//   FREE primary/fallback : gemini-3.1-flash-image-preview  (Nano Banana)
+//   PRO  primary          : gemini-3-pro-image-preview      (higher quality)
+//   PRO  fallback         : gemini-3.1-flash-image-preview  (graceful degrade)
 //
-// Env overrides are preserved so the operator can swap models without a
-// redeploy (e.g. to enable gemini-3.x the moment Google ships it, or to pin
-// a different Vertex-hosted variant during an incident).
-const FREE_MODEL_PRIMARY   = process.env.VERTEX_AI_MODEL_FREE      || process.env.FREE_MODEL_ID             || "gemini-2.5-flash-image-preview";
-const FREE_MODEL_FALLBACK  = process.env.VERTEX_AI_MODEL_FREE_FALLBACK    || process.env.FREE_MODEL_FALLBACK_ID    || "gemini-2.5-flash-image-preview";
-const PRO_MODEL_PRIMARY    = process.env.VERTEX_AI_MODEL_PREMIUM   || process.env.PREMIUM_MODEL_ID          || "gemini-2.5-flash-image-preview";
-const PRO_MODEL_FALLBACK   = process.env.VERTEX_AI_MODEL_PREMIUM_FALLBACK || process.env.PREMIUM_MODEL_FALLBACK_ID || "gemini-2.5-flash-image-preview";
+// Env overrides remain, so operators can pin a specific variant without a
+// redeploy. We use the SHORT model ID — @google/genai with `vertexai: true,
+// project, location` auto-builds the full resource path
+// `projects/.../locations/.../publishers/google/models/<id>` under the hood,
+// so no manual path construction is needed.
+const FREE_MODEL_PRIMARY   = process.env.VERTEX_AI_MODEL_FREE             || process.env.FREE_MODEL_ID             || "gemini-3.1-flash-image-preview";
+const FREE_MODEL_FALLBACK  = process.env.VERTEX_AI_MODEL_FREE_FALLBACK    || process.env.FREE_MODEL_FALLBACK_ID    || "gemini-3.1-flash-image-preview";
+const PRO_MODEL_PRIMARY    = process.env.VERTEX_AI_MODEL_PREMIUM          || process.env.PREMIUM_MODEL_ID          || "gemini-3-pro-image-preview";
+const PRO_MODEL_FALLBACK   = process.env.VERTEX_AI_MODEL_PREMIUM_FALLBACK || process.env.PREMIUM_MODEL_FALLBACK_ID || "gemini-3.1-flash-image-preview";
 
 // Retry configuration for resilience against 429 rate limits
 const MAX_RETRIES = 2;
@@ -102,10 +100,10 @@ async function withExponentialBackoff<T>(
 // per-request so TCP connections are ACTUALLY closed on timeout/abort.
 //
 // ─── Regional availability note (Phase 2 hotfix) ────────────────────────────
-// The Gemini image-capable preview models (gemini-2.5-flash-image-preview,
-// a.k.a. "Nano Banana") are NOT published in europe-west1 — calls there
-// return 403 "Permission denied or model may not exist", which we previously
-// misdiagnosed as an IAM misconfiguration.
+// Gemini image-preview models (gemini-3.1-flash-image-preview,
+// gemini-3-pro-image-preview) are NOT published in europe-west1 — calls
+// there return 403 "Permission denied or model may not exist", which we
+// previously misdiagnosed as an IAM misconfiguration.
 //
 // The canonical region for this model family in the EU is europe-west4
 // (Netherlands). We therefore:
@@ -120,7 +118,7 @@ async function withExponentialBackoff<T>(
 // If we ever need a different region (e.g. us-central1 for a new model), add
 // it to the allow-list below rather than broadening the override.
 const VERTEX_AI_REGION_ALLOWLIST = new Set<string>([
-  'europe-west4', // canonical EU region for gemini-2.5-flash-image-preview
+  'europe-west4', // canonical EU region for gemini-3.x image-preview models
   'us-central1',  // canonical US fallback — keep handy for emergencies
 ]);
 const VERTEX_AI_DEFAULT_REGION = 'europe-west4';
