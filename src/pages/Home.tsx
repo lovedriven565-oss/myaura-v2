@@ -70,6 +70,48 @@ export default function Home() {
           <Link to="/upload" className="w-full h-14 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl text-white font-medium text-[15px] flex items-center justify-center gap-2 transition-all active:scale-[0.98]">
             <span>Попробовать бесплатно</span>
           </Link>
+
+          {/* TEMP DEBUG — удалить после Phase 2 Step 5 testing */}
+          <button
+            type="button"
+            onClick={async () => {
+              const tg = (window as any).Telegram?.WebApp;
+              const initData: string = tg?.initData || "";
+              if (!initData) {
+                alert("❌ Telegram.WebApp.initData пуст.\n\nОткрой приложение внутри Telegram (не в обычном браузере).");
+                return;
+              }
+              // Try modern clipboard API first, fall back to a textarea hack.
+              let copied = false;
+              try {
+                if (navigator.clipboard && window.isSecureContext) {
+                  await navigator.clipboard.writeText(initData);
+                  copied = true;
+                }
+              } catch { /* fall through */ }
+              if (!copied) {
+                try {
+                  const ta = document.createElement("textarea");
+                  ta.value = initData;
+                  ta.style.position = "fixed";
+                  ta.style.opacity = "0";
+                  document.body.appendChild(ta);
+                  ta.focus();
+                  ta.select();
+                  copied = document.execCommand("copy");
+                  document.body.removeChild(ta);
+                } catch { /* ignored */ }
+              }
+              const prefix = copied
+                ? "✅ Скопировано в буфер обмена.\n\n"
+                : "⚠️ Не удалось скопировать автоматически. Выдели вручную:\n\n";
+              // alert() показывает длинную строку полностью — это нужно для копирования вручную на iOS
+              alert(prefix + initData);
+            }}
+            className="w-full h-12 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 rounded-2xl text-amber-200 font-medium text-[13px] flex items-center justify-center gap-2 transition-all active:scale-[0.98]"
+          >
+            <span>🔑 Скопировать Токен (DEBUG)</span>
+          </button>
         </section>
 
         <section className="flex flex-col gap-3 mb-16">
