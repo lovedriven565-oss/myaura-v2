@@ -458,7 +458,18 @@ const ALLOWED_IMAGE_MIMES = new Set<string>(ALLOWED_UPLOAD_CONTENT_TYPES);
 // via /api/upload-urls, PUTs each original directly to R2, and sends only the
 // resulting R2 object keys here — so Cloud Run never touches image bytes on
 // the HTTP request path.
-const StyleIdEnum = z.enum(["business", "lifestyle", "aura", "cinematic", "luxury", "editorial"]);
+const StyleIdEnum = z.enum([
+  "business",
+  "lifestyle",
+  "aura",
+  "cinematic",
+  "luxury",
+  "editorial",
+  // Premium-exclusive styles (gated at generation time, not at schema)
+  "cyberpunk",
+  "corporate",
+  "ethereal",
+]);
 
 const GenerateBodySchema = z.object({
   packageId: z.enum(["free", "starter", "pro", "max"]),
@@ -953,7 +964,11 @@ apiRouter.post("/generate",
       // Task for generating a single image (with quality gate + reroll)
       const generateOne = async (styleId: StyleId, index: number) => {
         // Defensive: ensure valid StyleId, fallback to business only if undefined
-        const validStyleId: StyleId = (styleId && ["business", "lifestyle", "aura", "cinematic", "luxury", "editorial"].includes(styleId)) ? styleId : "business";
+        const validStyleIds: StyleId[] = [
+          "business", "lifestyle", "aura", "cinematic", "luxury", "editorial",
+          "cyberpunk", "corporate", "ethereal",
+        ];
+        const validStyleId: StyleId = (styleId && validStyleIds.includes(styleId)) ? styleId : "business";
         if (validStyleId !== styleId) {
           console.warn(`[${id}] Image ${index}: Invalid styleId "${styleId}", falling back to business`);
         }
@@ -1102,7 +1117,8 @@ apiRouter.post("/generate",
             }
           }
           try {
-            await deliverTelegramResults(targetChatId, successPaths, referralCode);
+            // Mode is narrowed to "preview" by the outer guard, so tier is always "free" here.
+            await deliverTelegramResults(targetChatId, successPaths, referralCode, "free");
             console.log(`[${id}] Telegram delivery successful`);
           } catch (deliveryErr: any) {
             deliveryFailed = true;

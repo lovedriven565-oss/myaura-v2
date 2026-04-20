@@ -283,8 +283,19 @@ export default function UploadPremium() {
         return;
       }
 
-      // Credits exist but no package explicitly confirmed yet.
-      if (!confirmedPackageId) {
+      // If the user has paid credits but hasn't explicitly picked a package
+      // (e.g. credits granted manually via Supabase for testing, or they already
+      // bought a pack earlier), transparently default to the smallest tier
+      // ("starter") so they can spend their existing credit seamlessly instead
+      // of being forced back into the purchase modal.
+      let effectivePackageId = confirmedPackageId;
+      if (!effectivePackageId && paidCredits > 0) {
+        effectivePackageId = "starter";
+        setConfirmedPackageId("starter");
+        console.log("[GEN] Auto-selected 'starter' package for existing paid credit holder");
+      }
+
+      if (!effectivePackageId) {
         openStore();
         return;
       }
@@ -314,7 +325,7 @@ export default function UploadPremium() {
 
       console.log("[GEN] Starting R2 upload flow", {
         filesCount: files.length,
-        confirmedPackageId,
+        effectivePackageId,
         selectedStyle,
         ageTier,
         gender,
@@ -330,7 +341,7 @@ export default function UploadPremium() {
         setUploadPhase("uploading");
         const slots = await requestUploadUrls({
           files,
-          packageId: confirmedPackageId as "starter" | "pro" | "max",
+          packageId: effectivePackageId as "starter" | "pro" | "max",
         });
         imageKeys = await uploadFilesToR2(files, slots, (progress) => {
           const loaded = progress.reduce((s, p) => s + p.loaded, 0);
@@ -352,7 +363,7 @@ export default function UploadPremium() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          packageId: confirmedPackageId,
+          packageId: effectivePackageId,
           mode: "premium",
           styleIds: [selectedStyle],
           ageTier,

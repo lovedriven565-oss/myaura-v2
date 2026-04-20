@@ -300,8 +300,9 @@ export async function deliverTelegramResults(
   chatId: number,
   resultPaths: string[],
   referralCode?: string | null,
+  tier: "free" | "premium" = "free",
 ) {
-  console.log(`Attempting Telegram delivery to chat ${chatId}, ${resultPaths.length} image(s)`);
+  console.log(`Attempting Telegram delivery to chat ${chatId}, ${resultPaths.length} image(s), tier=${tier}`);
   if (!botInstance) { console.warn("Telegram delivery skipped: bot not initialized"); return; }
   if (resultPaths.length === 0) { console.warn("Telegram delivery skipped: no result paths"); return; }
 
@@ -314,8 +315,11 @@ export async function deliverTelegramResults(
     // For single output (free)
     if (resultPaths.length === 1) {
       const url = `${publicBaseUrl}/${resultPaths[0]}`;
+      const caption = tier === "free"
+        ? "Ваш нейро-портрет готов! ✨\n\n💎 В Premium HD — нейросеть нового поколения: кинематографическая детализация, 100% сохранение черт лица и эксклюзивные стили (Cyberpunk, Corporate, Ethereal)."
+        : "Ваш нейро-портрет готов! ✨";
       await botInstance.telegram.sendPhoto(chatId, url, {
-        caption: "Ваш нейро-портрет готов! ✨",
+        caption,
         ...(referralKeyboard ? { reply_markup: referralKeyboard } : {}),
       });
       return;
