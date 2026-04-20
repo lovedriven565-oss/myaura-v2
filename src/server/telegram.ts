@@ -273,21 +273,51 @@ export async function deliverTelegramPhoto(chatId: number, resultPath: string, c
 }
 
 /**
+ * Builds an inline keyboard for referral sharing.
+ * Uses `switch_inline_query` so Telegram opens its native share picker.
+ */
+function buildReferralKeyboard(referralCode: string) {
+  const botUsername =
+    process.env.BOT_USERNAME ||
+    process.env.VITE_BOT_USERNAME ||
+    "myaura_bot";
+  const shareMessage =
+    `✨ Попробуй MyAURA — нейросеть превращает селфи в профессиональные портреты. ` +
+    `По моей ссылке тебе дадут бесплатную генерацию: ` +
+    `https://t.me/${botUsername}?start=ref_${referralCode}`;
+  return {
+    inline_keyboard: [[
+      { text: "🎁 Пригласить друга (+1 фото)", switch_inline_query: shareMessage },
+    ]],
+  };
+}
+
+/**
  * Delivers generated results back to a Telegram chat (batch).
  * Used as fallback or for final delivery summary.
  */
-export async function deliverTelegramResults(chatId: number, resultPaths: string[]) {
+export async function deliverTelegramResults(
+  chatId: number,
+  resultPaths: string[],
+  referralCode?: string | null,
+) {
   console.log(`Attempting Telegram delivery to chat ${chatId}, ${resultPaths.length} image(s)`);
   if (!botInstance) { console.warn("Telegram delivery skipped: bot not initialized"); return; }
   if (resultPaths.length === 0) { console.warn("Telegram delivery skipped: no result paths"); return; }
-  
+
+  // Build share-a-friend inline keyboard (referral B-lite)
+  const referralKeyboard = referralCode ? buildReferralKeyboard(referralCode) : undefined;
+
   try {
     const publicBaseUrl = process.env.R2_PUBLIC_BASE_URL || "";
-    
+
     // For single output (free)
     if (resultPaths.length === 1) {
       const url = `${publicBaseUrl}/${resultPaths[0]}`;
-      await botInstance.telegram.sendPhoto(chatId, url, { caption: "Ваш нейро-портрет готов! ✨" });
+      await botInstance.telegram.sendPhoto(chatId, url, {
+        caption: "Ваш нейро-портрет готов! ✨",
+        ...(referralKeyboard ? { reply_markup: referralKeyboard } : {}),
+      });
       return;
     }
     
@@ -323,6 +353,19 @@ export async function deliverTelegramResults(chatId: number, resultPaths: string
             console.error(`Individual sendPhoto failed for ${path}: ${singleErr.message}`);
           }
         }
+      }
+    }
+
+    // Follow-up message with referral share button (media groups don't support reply_markup)
+    if (referralKeyboard) {
+      try {
+        await botInstance.telegram.sendMessage(
+          chatId,
+          "Поделитесь MyAURA с друзьями и получите +1 бесплатную генерацию за каждого, кто активирует аккаунт 🎁",
+          { reply_markup: referralKeyboard },
+        );
+      } catch (inviteErr: any) {
+        console.error(`[Referral] follow-up invite button failed for chat ${chatId}: ${inviteErr.message}`);
       }
     }
   } catch (error) {

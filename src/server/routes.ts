@@ -941,13 +941,13 @@ apiRouter.post("/generate",
       // Interim status updates to Telegram
       const chatTarget = telegramChatId || telegramUserId;
       if (chatTarget) {
-        sendTelegramStatus(chatTarget, "🎨 Запуск Nano Banana 2...").catch(() => {});
+        sendTelegramStatus(chatTarget, "🎨 Анализируем ваш запрос...").catch(() => {});
         setTimeout(() => {
-          sendTelegramStatus(chatTarget, "⚙️ Проверка облачных квот...").catch(() => {});
-        }, 2000);
+          sendTelegramStatus(chatTarget, "✨ Создаём вашу уникальную ауру...").catch(() => {});
+        }, 2500);
         setTimeout(() => {
-          sendTelegramStatus(chatTarget, "✨ Генерация...").catch(() => {});
-        }, 5000);
+          sendTelegramStatus(chatTarget, "🌟 Применяем финальные штрихи...").catch(() => {});
+        }, 6000);
       }
 
       // Task for generating a single image (with quality gate + reroll)
@@ -1090,8 +1090,19 @@ apiRouter.post("/generate",
       if (completedCount > 0 && mode !== 'premium') {
         const targetChatId = telegramChatId || telegramUserId;
         if (targetChatId) {
+          // Fetch (or mint) the user's referral_code so the delivery carries a share button.
+          let referralCode: string | null = null;
+          if (telegramUserId) {
+            try {
+              const { data: refRow } = await getDb()
+                .rpc("ensure_referral_code", { p_telegram_id: telegramUserId });
+              referralCode = refRow ?? null;
+            } catch (refErr: any) {
+              console.warn(`[${id}] ensure_referral_code failed: ${refErr?.message || refErr}`);
+            }
+          }
           try {
-            await deliverTelegramResults(targetChatId, successPaths);
+            await deliverTelegramResults(targetChatId, successPaths, referralCode);
             console.log(`[${id}] Telegram delivery successful`);
           } catch (deliveryErr: any) {
             deliveryFailed = true;
