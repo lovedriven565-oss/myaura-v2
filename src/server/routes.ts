@@ -5,7 +5,7 @@ import { storage } from "./storage.js";
 import { aiProvider } from "./ai.js";
 import { buildPrompt, StyleId, AgeTier, Gender } from "./prompts.js";
 import { validatePackageInput, buildStyleSchedule, buildStyleScheduleWithCount, runBatched, getGenerationConfig, PACKAGES, generationQueue } from "./packages.js";
-import { deliverTelegramPhoto, deliverTelegramResults, notifyReferralAwarded } from "./telegram.js";
+import { deliverTelegramPhoto, deliverTelegramResults, notifyReferralAwarded, sendTelegramStatus } from "./telegram.js";
 import { selectBestReferencePhotos } from "./inputCuration.js";
 import { evaluateGeneratedPhoto, clearRerollTracking } from "./qualityGate.js";
 import { enqueueGeneration, refundCredit, markCreditConsumed, checkRateLimit, clearRateLimit } from "./dbQueue.js";
@@ -937,6 +937,18 @@ apiRouter.post("/generate",
       const successPaths: string[] = [];
       const errors: string[] = [];
       let dbUpdateChain = Promise.resolve();
+
+      // Interim status updates to Telegram
+      const chatTarget = telegramChatId || telegramUserId;
+      if (chatTarget) {
+        sendTelegramStatus(chatTarget, "🎨 Запуск Nano Banana 2...").catch(() => {});
+        setTimeout(() => {
+          sendTelegramStatus(chatTarget, "⚙️ Проверка облачных квот...").catch(() => {});
+        }, 2000);
+        setTimeout(() => {
+          sendTelegramStatus(chatTarget, "✨ Генерация...").catch(() => {});
+        }, 5000);
+      }
 
       // Task for generating a single image (with quality gate + reroll)
       const generateOne = async (styleId: StyleId, index: number) => {

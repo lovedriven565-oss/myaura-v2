@@ -1,4 +1,5 @@
 import { GoogleGenAI } from "@google/genai";
+import { GoogleAuth } from "google-auth-library";
 import fs from "fs";
 import path from "path";
 
@@ -141,7 +142,7 @@ const VERTEX_AI_REGION_ALLOWLIST = new Set<string>([
   'europe-west4', // canonical EU region for gemini-3.x image-preview models
   'us-central1',  // canonical US fallback — keep handy for emergencies
 ]);
-const VERTEX_AI_DEFAULT_REGION = 'europe-west4';
+const VERTEX_AI_DEFAULT_REGION = 'us-central1';
 
 function resolveVertexLocation(): string {
   const raw = (process.env.VERTEX_AI_LOCATION || process.env.VERTEX_LOCATION || '').trim();
@@ -153,10 +154,9 @@ function resolveVertexLocation(): string {
 
   // Legacy env var still set to europe-west1: swap in code to avoid a redeploy
   // just to flip a string. Warn loudly so operators notice.
-  if (raw === 'europe-west1') {
+  if (raw === 'europe-west1' || raw === 'europe-west4') {
     console.warn(
-      `[ai] VERTEX_AI_LOCATION=europe-west1 is overridden to ${VERTEX_AI_DEFAULT_REGION}. ` +
-      `Gemini image-preview models are not available in europe-west1. ` +
+      `[ai] VERTEX_AI_LOCATION=${raw} is overridden to ${VERTEX_AI_DEFAULT_REGION} for diagnostic purposes. ` +
       `Update the env var on Cloud Run to silence this warning.`
     );
     return VERTEX_AI_DEFAULT_REGION;
@@ -173,7 +173,14 @@ function resolveVertexLocation(): string {
   return raw;
 }
 
-const VERTEX_LOCATION = resolveVertexLocation();
+// [v3.3-NANO-BANANA-ADMIN] ACTIVE REGION: us-central1 (Hard Override)
+const VERTEX_LOCATION = "us-central1";
+console.log(`[ai] [v3.3-NANO-BANANA-ADMIN] ACTIVE REGION: ${VERTEX_LOCATION}`);
+
+// Verified Model IDs in us-central1 for this project:
+const L1_PRIMARY_MODEL = "gemini-3.1-flash-image-preview";
+const L2_STABILITY_MODEL = "gemini-2.5-flash-image";
+const L3_SAFETY_NET_MODEL = "imagen-3.0-generate-001";
 
 // Project ID for ADC (Application Default Credentials) mode. When Cloud Run
 // runs us without service-account JSON keys in ./keys, we must still tell the
@@ -232,11 +239,14 @@ function buildKeyPool(): KeySlot[] {
  * "key exhausted" 24h cooldown on the only ADC slot. That is the Phase 2
  * regression this refactor fixes.
  */
-function createEphemeralClient(slot: KeySlot, signal: AbortSignal, locationOverride?: string): GoogleGenAI {
+function createEphemeralClient(slot: KeySlot, signal: AbortSignal, locationOverride?: string, apiVersionOverride?: string): GoogleGenAI {
+  const targetLocation = locationOverride || VERTEX_LOCATION;
+  const targetApiVersion = apiVersionOverride || 'v1';
   const opts: Record<string, any> = {
     httpOptions: { signal },
     vertexai: true,
-    location: locationOverride || VERTEX_LOCATION,
+    location: targetLocation,
+    apiVersion: targetApiVersion,
   };
 
   if (slot.keyPath) {
@@ -245,7 +255,7 @@ function createEphemeralClient(slot: KeySlot, signal: AbortSignal, locationOverr
     const prev = process.env.GOOGLE_APPLICATION_CREDENTIALS;
     process.env.GOOGLE_APPLICATION_CREDENTIALS = slot.keyPath;
     opts.project = slot.projectId;
-    console.log(`[Diagnostic] createEphemeralClient (JSON key ${slot.keyHint}): using project='${opts.project}', location='${opts.location}'`);
+    console.log(`[Diagnostic] [v3.2-US-FIX] createEphemeralClient (JSON key ${slot.keyHint}): using project='${opts.project}', location='${targetLocation}'`);
     const client = new GoogleGenAI(opts);
     if (prev !== undefined) {
       process.env.GOOGLE_APPLICATION_CREDENTIALS = prev;
@@ -265,7 +275,7 @@ function createEphemeralClient(slot: KeySlot, signal: AbortSignal, locationOverr
     );
   }
   opts.project = VERTEX_ADC_PROJECT;
-  console.log(`[Diagnostic] createEphemeralClient (ADC): using project='${opts.project}', location='${opts.location}'`);
+  console.log(`[Diagnostic] [v3.2-US-FIX] createEphemeralClient (ADC): using project='${opts.project}', location='${targetLocation}'`);
   return new GoogleGenAI(opts);
 }
 
@@ -329,6 +339,7 @@ function classifyError(err: any, errMsg: string, errDetails: any[], errBlob: str
   isBilling: boolean;
   isModelPermission: boolean;
   is429: boolean;
+  isNotFound: boolean;
 } {
   let parsedError: any = null;
   try { parsedError = JSON.parse(errMsg); } catch {}
@@ -351,8 +362,10 @@ function classifyError(err: any, errMsg: string, errDetails: any[], errBlob: str
   );
 
   const is429 = err?.status === 429 || errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED");
+  
+  const isNotFound = err?.status === 404 || err?.status === "NOT_FOUND" || errMsg.includes("404") || errMsg.includes("NOT_FOUND") || parsedError?.error?.status === "NOT_FOUND";
 
-  return { isBilling, isModelPermission, is429 };
+  return { isBilling, isModelPermission, is429, isNotFound };
 }
 
 // Safety settings: minimize blocking for real face generation
@@ -370,7 +383,9 @@ export class VertexAIProvider implements IGenerationProvider {
       const slot = await getNextClient();
       const ready = keyPool.filter(k => k.cooldownUntil <= Date.now()).length;
       console.log(`[KeyPool] Using key ...${slot.keyHint} | ${ready}/${keyPool.length} ready`);
-      return this._generate(slot, originalImageBase64, mimeType, prompt, mode, additionalImages);
+      // Use v1beta1 for premium if needed, or stick to v1 by default
+      const apiVersion = process.env.VERTEX_AI_API_VERSION || 'v1';
+      return this._generate(slot, originalImageBase64, mimeType, prompt, mode, additionalImages, apiVersion);
     };
 
     try {
@@ -381,7 +396,7 @@ export class VertexAIProvider implements IGenerationProvider {
     }
   }
 
-  private async _callModel(slot: KeySlot, modelId: string, contents: any[], mode: 'preview' | 'premium', locationOverride?: string): Promise<string> {
+  private async _callModel(slot: KeySlot, modelId: string, contents: any[], mode: 'preview' | 'premium', locationOverride?: string, apiVersionOverride?: string): Promise<string> {
     const timeoutMs = MODEL_CALL_TIMEOUT_MS[modelId] ?? DEFAULT_CALL_TIMEOUT_MS;
     const timeoutSec = Math.round(timeoutMs / 1000);
 
@@ -393,7 +408,8 @@ export class VertexAIProvider implements IGenerationProvider {
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const client = createEphemeralClient(slot, controller.signal, locationOverride);
+      const targetApiVersion = apiVersionOverride || process.env.VERTEX_AI_API_VERSION || 'v1';
+      const client = createEphemeralClient(slot, controller.signal, locationOverride, targetApiVersion);
 
       const response = await client.models.generateContent({
         model: modelId,
@@ -419,7 +435,17 @@ export class VertexAIProvider implements IGenerationProvider {
     } catch (err: any) {
       clearTimeout(timeoutId);
       // DIAGNOSTIC: Log the exact error payload from Vertex AI
-      console.log(`[Diagnostic] Vertex AI _callModel Error Full Body for ${modelId} in ${locationOverride || VERTEX_LOCATION}:`, JSON.stringify(err, null, 2));
+      console.log(`[Diagnostic] [v3.2-US-FIX] Vertex AI _callModel Error for ${modelId} in ${locationOverride || VERTEX_LOCATION}:`);
+      console.log(`  - message: ${err?.message}`);
+      const reason = err?.reason || err?.error?.reason || (err?.details && err?.details[0]?.reason);
+      console.log(`  - reason: ${reason}`);
+      console.log(`  - status/code: ${err?.status} / ${err?.code || err?.error?.code}`);
+      
+      try {
+        console.log(`  - raw object:`, JSON.stringify(err, Object.getOwnPropertyNames(err), 2));
+      } catch (e) {
+        console.log(`  - raw object: [Stringify Failed] ${String(err)}`);
+      }
 
       // AbortError = our timeout fired — translate to a recognisable isTimeout error
       if (err?.name === 'AbortError' || controller.signal.aborted) {
@@ -432,9 +458,9 @@ export class VertexAIProvider implements IGenerationProvider {
     }
   }
 
-  private async _callModelWithRegionFallback(slot: KeySlot, modelId: string, contents: any[], mode: 'preview' | 'premium'): Promise<string> {
+  private async _callModelWithRegionFallback(slot: KeySlot, modelId: string, contents: any[], mode: 'preview' | 'premium', apiVersion?: string): Promise<string> {
     try {
-      return await this._callModel(slot, modelId, contents, mode);
+      return await this._callModel(slot, modelId, contents, mode, VERTEX_LOCATION, apiVersion);
     } catch (err: any) {
       const errMsg: string = err?.message || "";
       const errDetails = err?.details || [];
@@ -444,24 +470,85 @@ export class VertexAIProvider implements IGenerationProvider {
       // If we got a 403 on the primary region (e.g. europe-west4), try us-central1 as a last resort
       // before giving up to the fallback chain.
       if (isModelPermission && VERTEX_LOCATION !== 'us-central1') {
-        console.warn(`[Region Fallback] 403 denied for ${modelId} in ${VERTEX_LOCATION}. Auto-retrying in us-central1...`);
-        return await this._callModel(slot, modelId, contents, mode, 'us-central1');
+        console.warn(`[Region Fallback] 403 denied for ${modelId} in ${VERTEX_LOCATION}. Auto-retrying explicitly in us-central1...`);
+        return await this._callModel(slot, modelId, contents, mode, 'us-central1', apiVersion);
       }
 
       throw err;
     }
   }
 
-  private async _generate(slot: KeySlot, originalImageBase64: string, mimeType: string, prompt: string, mode: 'preview' | 'premium', additionalImages?: string[]): Promise<string> {
-    const tier = mode === 'premium' ? 'PREMIUM' : 'FREE';
-    const primaryModel  = mode === 'premium' ? PRO_MODEL_PRIMARY  : FREE_MODEL_PRIMARY;
-    const fallbackModel = mode === 'premium' ? PRO_MODEL_FALLBACK : FREE_MODEL_FALLBACK;
+  /**
+   * Call Imagen via the `:predict` endpoint. Imagen models are NOT accessible
+   * via generateContent — they require the classic Vertex AI predict API with
+   * an `instances` array.
+   */
+  private async _callImagenPredict(modelId: string, prompt: string, additionalImages?: string[]): Promise<string> {
+    const auth = new GoogleAuth({
+      scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+    });
+    const client = await auth.getClient();
+    const tokenRes = await client.getAccessToken();
+    const token = tokenRes.token;
+    if (!token) throw new Error(`[Imagen] Failed to obtain access token for ${modelId}`);
 
+    const project = VERTEX_ADC_PROJECT;
+    if (!project) throw new Error(`[Imagen] VERTEX_ADC_PROJECT not set`);
+
+    const url = `https://${VERTEX_LOCATION}-aiplatform.googleapis.com/v1/projects/${project}/locations/${VERTEX_LOCATION}/publishers/google/models/${modelId}:predict`;
+
+    const body = {
+      instances: [{ prompt }],
+      parameters: {
+        sampleCount: 1,
+        aspectRatio: "1:1",
+        safetyFilterLevel: "block_only_high",
+        personGeneration: "allow_adult",
+      },
+    };
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), DEFAULT_CALL_TIMEOUT_MS);
+
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`[Imagen:predict] HTTP ${res.status}: ${errText.slice(0, 500)}`);
+      }
+
+      const data: any = await res.json();
+      const base64 = data?.predictions?.[0]?.bytesBase64Encoded;
+      if (!base64) {
+        throw new Error(`[Imagen:predict] No image in response: ${JSON.stringify(data).slice(0, 300)}`);
+      }
+      return base64;
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      if (err?.name === 'AbortError' || controller.signal.aborted) {
+        throw Object.assign(new Error(`[Imagen:predict TIMEOUT] ${modelId}`), { isTimeout: true });
+      }
+      throw err;
+    }
+  }
+
+  private async _generate(slot: KeySlot, originalImageBase64: string, mimeType: string, prompt: string, mode: 'preview' | 'premium', additionalImages?: string[], apiVersion?: string): Promise<string> {
+    const tier = mode === 'premium' ? 'PREMIUM' : 'FREE';
+
+    // Build multimodal contents (L1 and L2 are Gemini models — accept image inputs + text prompt)
     const FREE_V2 = process.env.FREE_MULTI_REF_V2_ENABLED === "true";
     const contents: any[] = [];
     contents.push({ inlineData: { data: originalImageBase64, mimeType } });
-    // Defense-in-depth: only pass additional refs when explicitly expected
-    // Premium: always. Free: only when FREE_V2 is enabled.
     if (additionalImages && additionalImages.length > 0 && (mode === 'premium' || FREE_V2)) {
       for (const img of additionalImages) {
         contents.push({ inlineData: { data: img, mimeType } });
@@ -469,64 +556,46 @@ export class VertexAIProvider implements IGenerationProvider {
     }
     contents.push({ text: prompt });
 
-    console.log(`[Stage1] [Tier: ${tier}] Trying ${primaryModel} (global) | key ...${slot.keyHint}`);
-
+    // ─── L1: PRIMARY (Gemini 3.1 Flash Image) ─────────────────────────
+    console.log(`[v3.3-NANO-BANANA-ADMIN] [Tier: ${tier}] L1 → ${L1_PRIMARY_MODEL} (${apiVersion || 'v1'}) | key ...${slot.keyHint}`);
     try {
-      const result = await this._callModelWithRegionFallback(slot, primaryModel, contents, mode);
-      console.log(`[Stage1] SUCCESS | [Tier: ${tier}] model=${primaryModel} | key ...${slot.keyHint} | preview: ${result.slice(0, 50)}...`);
+      const result = await this._callModelWithRegionFallback(slot, L1_PRIMARY_MODEL, contents, mode, apiVersion);
+      console.log(`[v3.3-NANO-BANANA-ADMIN] L1 SUCCESS | model=${L1_PRIMARY_MODEL}`);
       return result;
-    } catch (err: any) {
-      const errMsg: string = err?.message || "";
-      const errDetails = err?.details || [];
-      const errBlob = [errMsg, stringifyErrorDetails(errDetails), stringifyErrorDetails(err?.error), stringifyErrorDetails(err)].join(" ");
-      const { isBilling, isModelPermission, is429 } = classifyError(err, errMsg, errDetails, errBlob);
-      const isTimeout = !!(err?.isTimeout);
-      const isFetchFailed = errMsg.includes("fetch failed") || errMsg.includes("ECONNRESET") || errMsg.includes("ECONNREFUSED");
+    } catch (l1Err: any) {
+      const l1Msg = l1Err?.message || "";
+      const l1Cls = classifyError(l1Err, l1Msg, l1Err?.details || [], [l1Msg, stringifyErrorDetails(l1Err)].join(" "));
 
-      if (isBilling) {
-        markKey24hCooldown(slot, 'billing disabled');
-        throw err;
-      } else if (is429) {
-        markKeyCooldown(slot);
-        throw err;
-      } else if (isModelPermission) {
-        console.warn(`[IAM] Key ...${slot.keyHint}: ${primaryModel} denied → trying fallback ${fallbackModel}`);
-      } else if (isTimeout) {
-        console.warn(`[TIMEOUT] Key ...${slot.keyHint}: ${primaryModel} timed out → trying fallback ${fallbackModel}`);
-      } else if (isFetchFailed) {
-        console.warn(`[NET] Key ...${slot.keyHint}: ${primaryModel} fetch failed → trying fallback ${fallbackModel}`);
-      } else {
-        console.warn(`[Stage1] [Tier: ${tier}] Primary error (${primaryModel}): ${errMsg.slice(0, 120)} → trying fallback ${fallbackModel}`);
-      }
+      // 429/billing short-circuit: apply cooldowns, then still cascade
+      if (l1Cls.isBilling) markKey24hCooldown(slot, 'L1 billing disabled');
+      else if (l1Cls.is429) markKeyCooldown(slot);
 
-      // Fallback attempt
-      console.log(`[Stage1] [Tier: ${tier}] Fallback → ${fallbackModel} | key ...${slot.keyHint}`);
+      console.warn(`[v3.3-NANO-BANANA-ADMIN] L1 ${L1_PRIMARY_MODEL} failed (${l1Msg.slice(0, 120)}) → L2 ${L2_STABILITY_MODEL}`);
+
+      // ─── L2: STABILITY (Gemini 2.5 Flash Image — VERIFIED WORKING) ─────
       try {
-        const result = await this._callModelWithRegionFallback(slot, fallbackModel, contents, mode);
-        console.log(`[Stage1] SUCCESS (Fallback) | [Tier: ${tier}] model=${fallbackModel} | key ...${slot.keyHint}`);
+        const result = await this._callModel(slot, L2_STABILITY_MODEL, contents, mode, VERTEX_LOCATION, apiVersion);
+        console.log(`[v3.3-NANO-BANANA-ADMIN] L2 SUCCESS | model=${L2_STABILITY_MODEL}`);
         return result;
-      } catch (fallbackErr: any) {
-        const fbMsg: string = fallbackErr?.message || "";
-        const fbBlob = [fbMsg, stringifyErrorDetails(fallbackErr?.error), stringifyErrorDetails(fallbackErr)].join(" ");
-        const fb = classifyError(fallbackErr, fbMsg, fallbackErr?.details || [], fbBlob);
-        if (fb.isBilling) {
-          markKey24hCooldown(slot, 'billing disabled (fallback)');
-        } else if (fb.isModelPermission) {
-          const didCool = markKey24hCooldown(
-            slot,
-            `both ${primaryModel} and ${fallbackModel} denied → key unusable`
-          );
-          // Only raise isKeyExhausted for rotatable JSON keys — for ADC the
-          // caller should see the real error so it can be fixed in IAM, not
-          // silently retried on a non-existent next key.
-          if (didCool) {
-            throw Object.assign(fallbackErr, { isKeyExhausted: true });
-          }
-        } else if (fb.is429) {
-          markKeyCooldown(slot);
+      } catch (l2Err: any) {
+        const l2Msg = l2Err?.message || "";
+        const l2Cls = classifyError(l2Err, l2Msg, l2Err?.details || [], [l2Msg, stringifyErrorDetails(l2Err)].join(" "));
+        if (l2Cls.isBilling) markKey24hCooldown(slot, 'L2 billing disabled');
+        else if (l2Cls.is429) markKeyCooldown(slot);
+
+        console.warn(`[v3.3-NANO-BANANA-ADMIN] L2 ${L2_STABILITY_MODEL} failed (${l2Msg.slice(0, 120)}) → L3 ${L3_SAFETY_NET_MODEL}`);
+
+        // ─── L3: SAFETY NET (Imagen 3.0 via :predict endpoint) ──────────
+        try {
+          const result = await this._callImagenPredict(L3_SAFETY_NET_MODEL, prompt, additionalImages);
+          console.log(`[v3.3-NANO-BANANA-ADMIN] L3 SUCCESS | model=${L3_SAFETY_NET_MODEL} (:predict)`);
+          return result;
+        } catch (l3Err: any) {
+          const l3Msg = l3Err?.message || "";
+          console.error(`[v3.3-NANO-BANANA-ADMIN] L3 ${L3_SAFETY_NET_MODEL} failed (${l3Msg.slice(0, 200)})`);
+          console.error(`[v3.3-NANO-BANANA-ADMIN] FATAL: Full fallback chain exhausted (L1 → L2 → L3). Last err: ${l3Msg.slice(0, 200)}`);
+          throw new Error(`[v3.3] All image generation models failed. L1=${l1Msg.slice(0,80)} | L2=${l2Msg.slice(0,80)} | L3=${l3Msg.slice(0,80)}`);
         }
-        console.error(`[Stage1] FALLBACK FAILED | [Tier: ${tier}] model=${fallbackModel} | ${fbMsg.slice(0, 120)}`);
-        throw fallbackErr;
       }
     }
   }

@@ -207,6 +207,32 @@ export function initTelegramBot() {
 }
 
 /**
+ * Sends a text status update to the user.
+ */
+export async function sendTelegramStatus(chatId: number, message: string): Promise<number | null> {
+  if (!botInstance) return null;
+  try {
+    const msg = await botInstance.telegram.sendMessage(chatId, message);
+    return msg.message_id;
+  } catch (err: any) {
+    console.error(`[Telegram] sendTelegramStatus failed:`, err.message);
+    return null;
+  }
+}
+
+/**
+ * Deletes a Telegram message by ID.
+ */
+export async function deleteTelegramMessage(chatId: number, messageId: number): Promise<void> {
+  if (!botInstance) return;
+  try {
+    await botInstance.telegram.deleteMessage(chatId, messageId);
+  } catch (err: any) {
+    console.error(`[Telegram] deleteTelegramMessage failed:`, err.message);
+  }
+}
+
+/**
  * Sends a Telegram notification to a referrer when their referral award is granted.
  */
 export async function notifyReferralAwarded(telegramId: number): Promise<void> {
