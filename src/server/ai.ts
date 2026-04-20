@@ -23,9 +23,7 @@ const MAX_DELAY_MS = 60000;  // cap at 60s
 // Per-model call timeout. Keyed on model ID so future variants (Pro, 3.x)
 // pick up their own values once added. Unknown models fall back to DEFAULT.
 const MODEL_CALL_TIMEOUT_MS: Record<string, number> = {
-  ["gemini-2.5-flash-image-preview"]: 90_000,
-  // Kept for forward-compat once Google ships these on Vertex AI:
-  ["gemini-3.1-flash-image-preview"]: 90_000,
+  ["gemini-2.5-flash-image"]: 90_000,
   ["gemini-3-pro-image-preview"]:    120_000,
 };
 const DEFAULT_CALL_TIMEOUT_MS = 90_000;
@@ -106,7 +104,7 @@ printDiagnosticIdentity().catch(() => {});
 
 //
 // ─── Regional availability note (Phase 2 hotfix) ────────────────────────────
-// Gemini image-preview models (gemini-3.1-flash-image-preview,
+// Gemini image-preview and flash models (gemini-2.5-flash-image,
 // gemini-3-pro-image-preview) are NOT published in europe-west1 — calls
 // there return 403 "Permission denied or model may not exist", which we
 // previously misdiagnosed as an IAM misconfiguration.
@@ -163,7 +161,6 @@ const VERTEX_LOCATION = "us-central1";
 console.log(`[ai] [v3.3-NANO-BANANA-ADMIN] ACTIVE REGION: ${VERTEX_LOCATION}`);
 
 // Verified Model IDs in us-central1 for this project:
-const L1_PRIMARY_MODEL = "gemini-2.5-flash-image";
 const L2_STABILITY_MODEL = "imagen-3.0-generate-001";
 const L3_SAFETY_NET_MODEL = "imagen-3.0-generate-001";
 
@@ -541,11 +538,12 @@ export class VertexAIProvider implements IGenerationProvider {
     }
     contents.push({ text: prompt });
 
-    // ─── L1: PRIMARY (Gemini 3.1 Flash Image) ─────────────────────────
-    console.log(`[v3.3-NANO-BANANA-ADMIN] [Tier: ${tier}] L1 → ${L1_PRIMARY_MODEL} (${apiVersion || 'v1'}) | key ...${slot.keyHint}`);
+    // ─── L1: PRIMARY (Tier-based Gemini) ─────────────────────────
+    const l1Model = mode === 'premium' ? PRO_MODEL_PRIMARY : FREE_MODEL_PRIMARY;
+    console.log(`[v3.3-NANO-BANANA-ADMIN] [Tier: ${tier}] L1 → ${l1Model} (${apiVersion || 'v1'}) | key ...${slot.keyHint}`);
     try {
-      const result = await this._callModelWithRegionFallback(slot, L1_PRIMARY_MODEL, contents, mode, apiVersion);
-      console.log(`[v3.3-NANO-BANANA-ADMIN] L1 SUCCESS | model=${L1_PRIMARY_MODEL}`);
+      const result = await this._callModelWithRegionFallback(slot, l1Model, contents, mode, apiVersion);
+      console.log(`[v3.3-NANO-BANANA-ADMIN] L1 SUCCESS | model=${l1Model}`);
       return result;
     } catch (l1Err: any) {
       const l1Msg = l1Err?.message || "";
@@ -555,7 +553,7 @@ export class VertexAIProvider implements IGenerationProvider {
       if (l1Cls.isBilling) markKey24hCooldown(slot, 'L1 billing disabled');
       else if (l1Cls.is429) markKeyCooldown(slot);
 
-      console.warn(`[v3.3-NANO-BANANA-ADMIN] L1 ${L1_PRIMARY_MODEL} failed (${l1Msg.slice(0, 120)}) → L2 ${L2_STABILITY_MODEL}`);
+      console.warn(`[v3.3-NANO-BANANA-ADMIN] L1 ${l1Model} failed (${l1Msg.slice(0, 120)}) → L2 ${L2_STABILITY_MODEL}`);
 
       // ─── L2: STABILITY (Gemini 2.5 Flash Image — VERIFIED WORKING) ─────
       try {

@@ -2,7 +2,7 @@
  * Quality Gate Module for Post-Generation Evaluation
  * 
  * MyAURA 2-Model Stack:
- * - gemini-3.1-flash-image-preview (FREE tier + QualityGate judge)
+ * - gemini-2.5-flash-image (FREE tier + QualityGate judge)
  * - gemini-3-pro-image-preview (PRO tier)
  * 
  * Design principles:
@@ -18,7 +18,7 @@ import path from "path";
 // ─── Configuration ────────────────────────────────────────────────────────
 
 // QualityGate uses the same model as FREE tier generation for consistency
-const JUDGE_MODEL = process.env.JUDGE_MODEL_ID || "gemini-3.1-flash-image-preview";
+const JUDGE_MODEL = process.env.JUDGE_MODEL_ID || "gemini-2.5-flash-image";
 
 const PASS_THRESHOLD = parseInt(process.env.QUALITY_GATE_PASS_THRESHOLD || "60", 10);
 const REROLL_ENABLED = process.env.QUALITY_GATE_REROLL_ENABLED !== "false";
@@ -136,7 +136,7 @@ export function clearRerollTracking(generationId: string) {
 /**
  * Professional portrait photography evaluation using multimodal LLM.
  * 
- * Uses gemini-3.1-flash-image-preview (same as FREE tier generation).
+ * Uses gemini-2.5-flash-image (same as FREE tier generation).
  */
 async function multimodalJudge(
   referenceBase64: string,
@@ -309,7 +309,7 @@ Use failure tags from this list only: identity_drift, age_drift, plastic_skin, e
       // Handle specific model errors
       if (errMsg.includes("404") || errMsg.includes("not found") || errMsg.includes("invalid model")) {
         console.error(`[QualityGate] CRITICAL: Model "${JUDGE_MODEL}" not found or invalid.`);
-        console.error(`[QualityGate] Ensure JUDGE_MODEL_ID is set to gemini-3.1-flash-image-preview or gemini-3-pro-image-preview`);
+        console.error(`[QualityGate] Ensure JUDGE_MODEL_ID is set to gemini-2.5-flash-image or gemini-3-pro-image-preview`);
       }
       
       // Rate limiting
