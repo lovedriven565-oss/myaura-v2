@@ -280,7 +280,7 @@ function buildReferralKeyboard(referralCode: string) {
   const botUsername =
     process.env.BOT_USERNAME ||
     process.env.VITE_BOT_USERNAME ||
-    "myaura_bot";
+    "Myaura_neirobot";
   const shareMessage =
     `✨ Попробуй MyAURA — нейросеть превращает селфи в профессиональные портреты. ` +
     `По моей ссылке тебе дадут бесплатную генерацию: ` +
