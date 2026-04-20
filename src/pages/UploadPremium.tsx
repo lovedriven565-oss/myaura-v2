@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 
 import { useNavigate, Link } from "react-router-dom";
 
-import { Camera, X, Sparkles, Star, Check, Crown, Image as ImageIcon, ShieldCheck, ArrowRight, Wallet, Zap } from "lucide-react";
+import { Camera, X, Sparkles, Star, Check, Crown, Image as ImageIcon, ShieldCheck, ArrowRight, Wallet, Zap, Lock, Briefcase, Flame, Moon } from "lucide-react";
 
 import { apiFetch } from "../lib/api";
 
@@ -54,21 +54,40 @@ interface CatalogPkg {
 
 
 
-const PREMIUM_STYLES = [
+// Premium style catalog.
+// `exclusive: true` marks server-gated premium-only styles (see
+// src/server/prompts.ts:PREMIUM_EXCLUSIVE_STYLES). These are surfaced with an
+// "EXCLUSIVE" badge and, for users without paid credits, a lock affordance
+// that opens the purchase flow instead of selecting the style.
+type PremiumStyle = {
+  id: string;
+  name: string;
+  desc: string;
+  exclusive?: boolean;
+  // Tailwind gradient classes for the small icon medallion on exclusive tiles.
+  accentGradient?: string;
+};
 
-  { id: "business", name: "Бизнес-портрет", desc: "Строгий и дорогой корпоративный стиль" },
-
-  { id: "lifestyle", name: "Премиум lifestyle", desc: "Естественный свет, дорогие интерьеры" },
-
-  { id: "cinematic", name: "Кинематографичный", desc: "Глубокие тени, киношная цветокоррекция" },
-
-  { id: "editorial", name: "Studio Editorial", desc: "Журнальная обложка, fashion-свет" },
-
-  { id: "luxury", name: "Luxury", desc: "Эстетика old money, вечерние образы" },
-
-  { id: "aura", name: "Aura", desc: "Фирменный стиль с мягким свечением" }
-
+const PREMIUM_STYLES: PremiumStyle[] = [
+  { id: "business",   name: "Бизнес-портрет",      desc: "Строгий и дорогой корпоративный стиль" },
+  { id: "lifestyle",  name: "Премиум lifestyle",   desc: "Естественный свет, дорогие интерьеры" },
+  { id: "cinematic",  name: "Кинематографичный",   desc: "Глубокие тени, киношная цветокоррекция" },
+  { id: "editorial",  name: "Studio Editorial",    desc: "Журнальная обложка, fashion-свет" },
+  { id: "luxury",     name: "Luxury",              desc: "Эстетика old money, вечерние образы" },
+  { id: "aura",       name: "Aura",                desc: "Фирменный стиль с мягким свечением" },
+  // ── Premium-exclusive (server-gated) ──────────────────────────────────────
+  { id: "cyberpunk",  name: "Cyberpunk",           desc: "Неоновый город, блейд-раннер атмосфера",      exclusive: true, accentGradient: "from-fuchsia-500 to-cyan-400" },
+  { id: "corporate",  name: "Corporate Executive", desc: "CEO-уровень, институциональная уверенность",  exclusive: true, accentGradient: "from-amber-400 to-orange-500" },
+  { id: "ethereal",   name: "Ethereal",            desc: "Небесный, живописный, ренессансный свет",     exclusive: true, accentGradient: "from-indigo-400 to-pink-300" },
 ];
+
+// Map style → icon for the exclusive tiles. Regular styles stay icon-free to
+// preserve the existing clean grid density.
+const EXCLUSIVE_STYLE_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
+  cyberpunk: Flame,
+  corporate: Briefcase,
+  ethereal:  Moon,
+};
 
 
 
@@ -119,6 +138,18 @@ export default function UploadPremium() {
   // Resolved from catalog only after explicit confirmation in modal — the ONLY package used for generation
 
   const confirmedPkg = catalog.find(p => p.id === confirmedPackageId) ?? null;
+
+  // If the balance changes (e.g. user exhausts paid credits between mount and
+  // re-render), auto-demote any selected exclusive style to `business` so we
+  // never ship a `styleId` the backend will reject. This guards the edge case
+  // where a user pre-selected Cyberpunk and then used up their last credit in
+  // another tab.
+  useEffect(() => {
+    const selected = PREMIUM_STYLES.find(s => s.id === selectedStyle);
+    if (selected?.exclusive && !canGenerate) {
+      setSelectedStyle("business");
+    }
+  }, [canGenerate, selectedStyle]);
 
 
 
@@ -546,36 +577,68 @@ export default function UploadPremium() {
           <div className="flex items-center justify-between mb-4">
 
             <h2 className="text-[13px] font-medium tracking-widest uppercase text-white/50">Выберите стиль</h2>
+            <span className="text-[11px] text-[#d8b4fe]/70 flex items-center gap-1">
+              <Sparkles className="w-3 h-3" />
+              <span>3 новых</span>
+            </span>
 
           </div>
 
           <div className="grid grid-cols-2 gap-3">
 
-            {PREMIUM_STYLES.map((style) => (
+            {PREMIUM_STYLES.map((style) => {
+              const isSelected = selectedStyle === style.id;
+              // Locked = exclusive style AND user has no paid credits.
+              // UploadPremium is gated by paid credits anyway, but a user who
+              // arrived here with 0 paid credits can still browse — we want
+              // them to see the premium catalog and convert, not silently pick
+              // a style that will fail at generation time.
+              const isLocked = !!style.exclusive && !canGenerate;
+              const Icon = style.exclusive ? EXCLUSIVE_STYLE_ICONS[style.id] : null;
+              return (
+                <div
+                  key={style.id}
+                  onClick={() => {
+                    if (isLocked) {
+                      openStore();
+                      return;
+                    }
+                    setSelectedStyle(style.id);
+                  }}
+                  className={`relative p-4 rounded-2xl border cursor-pointer transition-all duration-300 overflow-hidden ${
+                    isSelected
+                      ? 'border-[#c084fc] bg-[#c084fc]/10 shadow-[0_0_20px_rgba(192,132,252,0.15)]'
+                      : style.exclusive
+                        ? 'border-[#c084fc]/25 bg-gradient-to-br from-white/[0.03] to-[#c084fc]/[0.04] hover:from-white/[0.05] hover:to-[#c084fc]/[0.07]'
+                        : 'border-white/10 bg-white/[0.02] hover:bg-white/[0.04]'
+                  } ${isLocked ? 'opacity-80' : ''}`}
+                >
+                  {style.exclusive && (
+                    <div className={`absolute top-2 right-2 px-1.5 py-0.5 rounded-md text-[8px] font-bold tracking-widest uppercase bg-gradient-to-r ${style.accentGradient ?? 'from-[#c084fc] to-[#a855f7]'} text-white/95 shadow-[0_0_10px_rgba(192,132,252,0.25)]`}>
+                      {isLocked ? 'LOCKED' : 'EXCL.'}
+                    </div>
+                  )}
 
-              <div 
+                  {Icon && style.accentGradient && (
+                    <div className={`w-8 h-8 mb-2 rounded-lg bg-gradient-to-br ${style.accentGradient} flex items-center justify-center shadow-[0_0_12px_rgba(192,132,252,0.2)]`}>
+                      {isLocked
+                        ? <Lock className="w-4 h-4 text-white/90" />
+                        : <Icon className="w-4 h-4 text-white" />
+                      }
+                    </div>
+                  )}
 
-                key={style.id}
+                  <div className="flex justify-between items-start mb-2">
+                    <span className={`font-medium text-[14px] ${isSelected ? 'text-[#e9d5ff]' : 'text-white/90'}`}>
+                      {style.name}
+                    </span>
+                    {isSelected && <Check className="w-4 h-4 text-[#c084fc] shrink-0 ml-1" />}
+                  </div>
 
-                onClick={() => setSelectedStyle(style.id)}
-
-                className={`p-4 rounded-2xl border cursor-pointer transition-all duration-300 ${selectedStyle === style.id ? 'border-[#c084fc] bg-[#c084fc]/10 shadow-[0_0_20px_rgba(192,132,252,0.15)]' : 'border-white/10 bg-white/[0.02] hover:bg-white/[0.04]'}`}
-
-              >
-
-                <div className="flex justify-between items-start mb-2">
-
-                  <span className={`font-medium text-[14px] ${selectedStyle === style.id ? 'text-[#e9d5ff]' : 'text-white/90'}`}>{style.name}</span>
-
-                  {selectedStyle === style.id && <Check className="w-4 h-4 text-[#c084fc] shrink-0 ml-1" />}
-
+                  <p className="text-[12px] text-white/50 leading-snug">{style.desc}</p>
                 </div>
-
-                <p className="text-[12px] text-white/50 leading-snug">{style.desc}</p>
-
-              </div>
-
-            ))}
+              );
+            })}
 
           </div>
 

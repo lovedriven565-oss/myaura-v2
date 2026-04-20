@@ -8,3 +8,15 @@ coverage/
 !.env.example
 keys/*.json
 !keys/dummy.json
+
+# Local diagnostic dumps (may contain access tokens / IAM policies)
+adc_token.txt
+curl_verbose.txt
+*.iam.json
+iam_policy.json
+model_detail.json
+models.json
+models_list.json
+models_list_v2.json
+pub_models.json
+scripts/out.json
