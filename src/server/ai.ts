@@ -8,35 +8,12 @@ export interface IGenerationProvider {
 }
 
 // ─── MyAURA Model Stack (Vertex AI) ─────────────────────────────────────────
-// Confirmed via Vertex AI Model Garden screenshot (2026-04-20): the IDs
-// "gemini-3.1-flash-image-preview" and "gemini-3-pro-image-preview" DO exist
-// on Vertex AI. The 403 "may not exist" wording from the API is misleading —
-// it fires for any combination of (model unavailable in region, project not
-// allow-listed, missing IAM). The right region (europe-west4, see below)
-// plus roles/aiplatform.user on the Cloud Run SA is what unlocks these.
-//
-// Model assignment:
-//   FREE primary/fallback : gemini-3.1-flash-image-preview  (Nano Banana)
-//   PRO  primary          : gemini-3-pro-image-preview      (higher quality)
-//   PRO  fallback         : gemini-3.1-flash-image-preview  (graceful degrade)
-//
-// Env overrides remain, so operators can pin a specific variant without a
-// redeploy. We use the SHORT model ID — @google/genai with `vertexai: true,
-// project, location` auto-builds the full resource path
-// `projects/.../locations/.../publishers/google/models/<id>` under the hood,
-// so no manual path construction is needed.
-// 2026-04-20 L1 BYPASS: gemini-3.1-flash-image-preview is 404 NOT_FOUND for
-// this project in both europe-west4 AND us-central1 publisher registries,
-// despite appearing in Model Garden. It's not allowlisted for our GCP org.
-// Every L1 attempt burns ~15–30s (primary + regional fallback) before the
-// system degrades to L2. Until Google unblocks the preview model, we skip
-// it entirely and point everything at gemini-2.5-flash-image (confirmed
-// working per logs). Env vars still win so re-enabling is a no-deploy config
-// change when the 3.1 model goes GA.
-const FREE_MODEL_PRIMARY   = process.env.VERTEX_AI_MODEL_FREE             || process.env.FREE_MODEL_ID             || "gemini-2.5-flash-image";
-const FREE_MODEL_FALLBACK  = process.env.VERTEX_AI_MODEL_FREE_FALLBACK    || process.env.FREE_MODEL_FALLBACK_ID    || "gemini-2.5-flash-image";
-const PRO_MODEL_PRIMARY    = process.env.VERTEX_AI_MODEL_PREMIUM          || process.env.PREMIUM_MODEL_ID          || "gemini-3-pro-image-preview";
-const PRO_MODEL_FALLBACK   = process.env.VERTEX_AI_MODEL_PREMIUM_FALLBACK || process.env.PREMIUM_MODEL_FALLBACK_ID || "gemini-2.5-flash-image";
+// 2026-04-20 BYPASS: Hardcode models to Gemini 2.5 to skip broken 3.1 404/timeout.
+// Env overrides are temporarily ignored to unblock production.
+const FREE_MODEL_PRIMARY   = "gemini-2.5-flash-image";
+const FREE_MODEL_FALLBACK  = "gemini-2.5-flash-image";
+const PRO_MODEL_PRIMARY    = "gemini-3-pro-image-preview";
+const PRO_MODEL_FALLBACK   = "gemini-2.5-flash-image";
 
 // Retry configuration for resilience against 429 rate limits
 const MAX_RETRIES = 2;
@@ -186,8 +163,8 @@ const VERTEX_LOCATION = "us-central1";
 console.log(`[ai] [v3.3-NANO-BANANA-ADMIN] ACTIVE REGION: ${VERTEX_LOCATION}`);
 
 // Verified Model IDs in us-central1 for this project:
-const L1_PRIMARY_MODEL = "gemini-3.1-flash-image-preview";
-const L2_STABILITY_MODEL = "gemini-2.5-flash-image";
+const L1_PRIMARY_MODEL = "gemini-2.5-flash-image";
+const L2_STABILITY_MODEL = "imagen-3.0-generate-001";
 const L3_SAFETY_NET_MODEL = "imagen-3.0-generate-001";
 
 // Project ID for ADC (Application Default Credentials) mode. When Cloud Run

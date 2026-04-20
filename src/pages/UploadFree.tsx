@@ -3,6 +3,7 @@ import { useNavigate, Link } from "react-router-dom";
 import { Camera, X, Sparkles, Sun, Wand2, Wallet } from "lucide-react";
 import { apiFetch } from "../lib/api";
 import { requestUploadUrls, uploadFilesToR2 } from "../lib/uploadToR2";
+import { compressImage } from "../lib/imageCompression";
 
 // Detect Telegram Mini App IDs for delivery
 function getTelegramIds(): { chatId: string | null; userId: string | null } {
@@ -140,15 +141,24 @@ export default function UploadFree() {
     }
 
     // Phase 2 upload flow:
-    //   1) Mint presigned URLs on the backend.
-    //   2) PUT originals directly to R2 (browser → R2, never through our server).
-    //   3) POST only the resulting R2 keys to /api/generate.
+    //   1) Compress images to stay under 20MB limit and keep AI-friendly dimensions.
+    //   2) Mint presigned URLs on the backend.
+    //   3) PUT originals directly to R2 (browser → R2, never through our server).
+    //   4) POST only the resulting R2 keys to /api/generate.
     let imageKeys: string[];
     try {
       setUploadPhase("uploading");
-      setDebugInfo(`Загрузка ${files.length} фото в облако...`);
-      const slots = await requestUploadUrls({ files, packageId: "free" });
-      imageKeys = await uploadFilesToR2(files, slots, (progress) => {
+      setDebugInfo(`Сжатие и загрузка ${files.length} фото...`);
+
+      // 1) Compress
+      const compressedFiles = await Promise.all(files.map(f => compressImage(f)));
+      console.log(`[UploadFree] Compressed ${compressedFiles.length} files`);
+
+      // 2) Request URLs
+      const slots = await requestUploadUrls({ files: compressedFiles, packageId: "free" });
+
+      // 3) Upload
+      imageKeys = await uploadFilesToR2(compressedFiles, slots, (progress) => {
         // Aggregate byte progress across all files into a single 0-100% number.
         const loaded = progress.reduce((s, p) => s + p.loaded, 0);
         const total = progress.reduce((s, p) => s + p.total, 0) || 1;

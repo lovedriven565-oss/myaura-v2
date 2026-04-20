@@ -7,6 +7,7 @@ import { Camera, X, Sparkles, Star, Check, Crown, Image as ImageIcon, ShieldChec
 import { apiFetch } from "../lib/api";
 
 import { requestUploadUrls, uploadFilesToR2 } from "../lib/uploadToR2";
+import { compressImage } from "../lib/imageCompression";
 
 
 
@@ -363,18 +364,27 @@ export default function UploadPremium() {
       });
 
       // Phase 2 direct-to-R2 upload:
-      //   1) /api/upload-urls mints presigned PUT URLs (one per file).
-      //   2) Browser PUTs originals directly to R2 — no canvas compression,
+      //   1) Compress images to stay under 20MB limit and keep AI-friendly dimensions.
+      //   2) /api/upload-urls mints presigned PUT URLs (one per file).
+      //   3) Browser PUTs originals directly to R2 — no canvas compression,
       //      no multipart payload through Cloud Run (bypassing the 32 MB limit).
-      //   3) /api/generate receives only the resulting R2 object keys.
+      //   4) /api/generate receives only the resulting R2 object keys.
       let imageKeys: string[];
       try {
         setUploadPhase("uploading");
+        
+        // 1) Compress
+        const compressedFiles = await Promise.all(files.map(f => compressImage(f)));
+        console.log(`[GEN] Compressed ${compressedFiles.length} files`);
+
+        // 2) Request URLs
         const slots = await requestUploadUrls({
-          files,
+          files: compressedFiles,
           packageId: effectivePackageId as "starter" | "pro" | "max",
         });
-        imageKeys = await uploadFilesToR2(files, slots, (progress) => {
+
+        // 3) Upload
+        imageKeys = await uploadFilesToR2(compressedFiles, slots, (progress) => {
           const loaded = progress.reduce((s, p) => s + p.loaded, 0);
           const total = progress.reduce((s, p) => s + p.total, 0) || 1;
           setUploadPct(Math.round((loaded / total) * 100));
