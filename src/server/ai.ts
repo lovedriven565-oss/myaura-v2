@@ -7,14 +7,15 @@ export interface IGenerationProvider {
 }
 
 // ─── MyAURA Model Stack (Vertex AI) ─────────────────────────────────────────
-// v3.4 PRO-FIX (2026-04-21):
-//   Premium tier MUST use gemini-3-pro-image-preview (approved quota on
-//   myaura-production-492012). Free tier uses gemini-2.5-flash-image.
-//   No Imagen fallbacks — Imagen has been unstable in production and was
-//   crashing the event loop via 500 Internal Error + "fetch failed
-//   (other side closed)" leading to SIGTERM. If L1 fails, we fail gracefully
-//   and surface the error upstream.
-const FREE_MODEL_PRIMARY = "gemini-2.5-flash-image";
+// v3.5 GLOBAL-FIX (2026-04-21):
+//   Both preview models (gemini-3-pro-image-preview and
+//   gemini-3.1-flash-image-preview) are only exposed via the Vertex AI
+//   `global` endpoint with apiVersion `v1beta1`. All regional endpoints
+//   (europe-west4/1, us-central1) return 404 NOT_FOUND — verified via
+//   probe on 2026-04-21 against project myaura-production-492012.
+//   No Imagen fallbacks — they were unstable in production (500s +
+//   "fetch failed (other side closed)" crashing the event loop into SIGTERM).
+const FREE_MODEL_PRIMARY = "gemini-3.1-flash-image-preview";
 const PRO_MODEL_PRIMARY  = "gemini-3-pro-image-preview";
 
 // Retry configuration for resilience against 429 rate limits
@@ -25,8 +26,9 @@ const MAX_DELAY_MS = 60000;  // cap at 60s
 // Per-model call timeout. Keyed on model ID so future variants (Pro, 3.x)
 // pick up their own values once added. Unknown models fall back to DEFAULT.
 const MODEL_CALL_TIMEOUT_MS: Record<string, number> = {
-  ["gemini-2.5-flash-image"]: 90_000,
-  ["gemini-3-pro-image-preview"]:    120_000,
+  ["gemini-2.5-flash-image"]:          90_000,
+  ["gemini-3.1-flash-image-preview"]:  90_000,
+  ["gemini-3-pro-image-preview"]:     120_000,
 };
 const DEFAULT_CALL_TIMEOUT_MS = 90_000;
 
@@ -105,20 +107,23 @@ async function printDiagnosticIdentity() {
 printDiagnosticIdentity().catch(() => {});
 
 //
-// ─── Regional availability (v3.4 PRO-FIX) ───────────────────────────────────
-// Vertex AI quota is STRICTLY region-bound. The Premium project
-// (myaura-production-492012) has approved gemini-3-pro-image-preview quota
-// in EU regions, so we default to europe-west4 (canonical for 3.x image-
-// preview models). Operators can pin a specific region via
-// VERTEX_AI_LOCATION / VERTEX_LOCATION. We NO LONGER force a hard override
-// to us-central1 — that is what caused the "location='us-central1' 404"
-// regression.
+// ─── Regional availability (v3.5 GLOBAL-FIX) ────────────────────────────────
+// Both preview models (gemini-3-pro-image-preview and
+// gemini-3.1-flash-image-preview) are ONLY served by the `global` Vertex
+// endpoint. All regional endpoints return 404. The GA
+// gemini-2.5-flash-image model still works regionally, but since we route
+// everything through preview models now we hardcode `global` and treat
+// regional values as legacy overrides.
 const VERTEX_AI_REGION_ALLOWLIST = new Set<string>([
-  'europe-west4', // canonical EU region for gemini-3.x image-preview models
-  'europe-west1', // secondary EU region
-  'us-central1',  // canonical US fallback — keep handy for emergencies
+  'global',       // REQUIRED for preview models (gemini-3-pro, gemini-3.1-flash)
+  'europe-west4',
+  'europe-west1',
+  'us-central1',
 ]);
-const VERTEX_AI_DEFAULT_REGION = 'europe-west4';
+const VERTEX_AI_DEFAULT_REGION = 'global';
+// Preview models MUST use `global`. Used to override VERTEX_LOCATION when
+// the resolved location is a regional one but the model is preview.
+const VERTEX_AI_PREVIEW_LOCATION = 'global';
 
 function resolveVertexLocation(): string {
   const raw = (process.env.VERTEX_AI_LOCATION || process.env.VERTEX_LOCATION || '').trim();
@@ -139,9 +144,9 @@ function resolveVertexLocation(): string {
   return raw;
 }
 
-// [v3.4-PRO-FIX] ACTIVE REGION: resolve from environment (prefer europe-west4)
+// [v3.5-GLOBAL-FIX] ACTIVE REGION: resolve from environment (prefer global)
 const VERTEX_LOCATION = resolveVertexLocation();
-console.log(`[ai] [v3.4-PRO-FIX] ACTIVE REGION: ${VERTEX_LOCATION}`);
+console.log(`[ai] [v3.5-GLOBAL-FIX] ACTIVE REGION: ${VERTEX_LOCATION}`);
 
 // Project ID for ADC (Application Default Credentials) mode. When Cloud Run
 // runs us without service-account JSON keys in ./keys, we must still tell the
@@ -449,18 +454,22 @@ export class VertexAIProvider implements IGenerationProvider {
     // triggered SIGTERM on Cloud Run. Fail fast instead.
     const l1Model = mode === 'premium' ? PRO_MODEL_PRIMARY : FREE_MODEL_PRIMARY;
 
-    // Preview models (gemini-3-pro-image-preview) require v1beta1 on Vertex AI.
-    // Non-preview GA models stay on v1. Honour explicit env override above all.
+    // Preview models (gemini-3-pro-image-preview, gemini-3.1-flash-image-preview)
+    // REQUIRE v1beta1 and location=global on Vertex AI. Verified via probe
+    // on 2026-04-21 — regional endpoints return 404 for preview models.
+    // Non-preview GA models keep v1 and the configured regional location.
+    const isPreviewModel = l1Model.includes('preview');
     const envApiVersion = (process.env.VERTEX_AI_API_VERSION || '').trim();
     const effectiveApiVersion = envApiVersion
       ? envApiVersion
-      : (l1Model.includes('preview') ? 'v1beta1' : (apiVersion || 'v1'));
+      : (isPreviewModel ? 'v1beta1' : (apiVersion || 'v1'));
+    const effectiveLocation = isPreviewModel ? VERTEX_AI_PREVIEW_LOCATION : VERTEX_LOCATION;
 
-    console.log(`[v3.4-PRO-FIX] [Tier: ${tier}] L1 → ${l1Model} (${effectiveApiVersion}) | region=${VERTEX_LOCATION} | key ...${slot.keyHint}`);
+    console.log(`[v3.5-GLOBAL-FIX] [Tier: ${tier}] L1 → ${l1Model} (${effectiveApiVersion}) | region=${effectiveLocation} | key ...${slot.keyHint}`);
 
     try {
-      const result = await this._callModelNoFallback(slot, l1Model, contents, mode, effectiveApiVersion);
-      console.log(`[v3.4-PRO-FIX] L1 SUCCESS | model=${l1Model}`);
+      const result = await this._callModel(slot, l1Model, contents, mode, effectiveLocation, effectiveApiVersion);
+      console.log(`[v3.5-GLOBAL-FIX] L1 SUCCESS | model=${l1Model}@${effectiveLocation}`);
       return result;
     } catch (l1Err: any) {
       const l1Msg = l1Err?.message || "";
@@ -470,8 +479,8 @@ export class VertexAIProvider implements IGenerationProvider {
       if (l1Cls.isBilling) markKey24hCooldown(slot, 'L1 billing disabled');
       else if (l1Cls.is429) markKeyCooldown(slot);
 
-      console.error(`[v3.4-PRO-FIX] L1 ${l1Model} FATAL in ${VERTEX_LOCATION} (${l1Msg.slice(0, 200)})`);
-      throw new Error(`[v3.4] Generation failed on ${l1Model}@${VERTEX_LOCATION}: ${l1Msg.slice(0, 150)}`);
+      console.error(`[v3.5-GLOBAL-FIX] L1 ${l1Model} FATAL in ${effectiveLocation} (${l1Msg.slice(0, 200)})`);
+      throw new Error(`[v3.5] Generation failed on ${l1Model}@${effectiveLocation}: ${l1Msg.slice(0, 150)}`);
     }
   }
 }
