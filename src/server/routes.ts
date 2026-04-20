@@ -8,7 +8,7 @@ import { validatePackageInput, buildStyleSchedule, buildStyleScheduleWithCount, 
 import { deliverTelegramPhoto, deliverTelegramResults, notifyReferralAwarded, sendTelegramStatus } from "./telegram.js";
 import { selectBestReferencePhotos } from "./inputCuration.js";
 import { evaluateGeneratedPhoto, clearRerollTracking } from "./qualityGate.js";
-import { enqueueGeneration, refundCredit, markCreditConsumed, checkRateLimit, clearRateLimit } from "./dbQueue.js";
+import { enqueueGeneration, refundCredit, checkRateLimit, clearRateLimit } from "./dbQueue.js";
 import { updateGenerationHeartbeat } from "./watchdog.js";
 import {
   MAX_FILE_SIZE_BYTES,
@@ -867,13 +867,22 @@ apiRouter.post("/generate",
         return res.status(500).json({ error: "Failed to consume credit", code: "CREDIT_ERROR" });
       }
 
-      // Record that credit was consumed (for potential refund if generation fails)
-      await markCreditConsumed(id, creditType);
-      (req as any).creditType = creditType;  // Store for error handling
+      // Stash creditType on the request so downstream error handlers can refund.
+      (req as any).creditType = creditType;
 
       console.log(`[${id}] Consumed 1 ${creditType} credit (mode=${mode}) from user ${telegramUserId}`);
     }
 
+    // Pull creditType back out for the INSERT so the row is born with the
+    // correct bookkeeping columns. The previous code called
+    // `markCreditConsumed` BEFORE this insert (an UPDATE against a row that
+    // did not yet exist → 0 rows affected), then inserted the generation
+    // without `credit_type`. That left every generation with
+    // credit_type=NULL, which made the Watchdog's refund path unreachable
+    // ("Cannot refund gen=… — missing userId or creditType"). Embedding the
+    // field directly in the INSERT is the root-cause fix: one statement, no
+    // UPDATE-before-INSERT race, credit_type present from row-birth.
+    const insertCreditType = (req as any).creditType as ("free" | "paid" | undefined);
     const { error: insertError } = await db
       .from("generations")
       .insert({
@@ -890,7 +899,11 @@ apiRouter.post("/generate",
         results_completed: 0,
         expires_at: expiresAt,
         telegram_chat_id: telegramChatId,
-        telegram_user_id: telegramUserId
+        telegram_user_id: telegramUserId,
+        // Refund bookkeeping — these MUST be set at row-birth so the watchdog
+        // can refund zombies. See comment above.
+        credit_type: insertCreditType ?? null,
+        credit_consumed: !!insertCreditType,
       });
 
     if (insertError) {
@@ -986,17 +999,32 @@ apiRouter.post("/generate",
 
           if (gate.shouldReroll) {
             console.log(`[${id}] Image ${index}: quality gate failed (score=${gate.score.overallScore}), attempting reroll...`);
+            // Memory optimisation: release the stale output (~4–8 MB per
+            // variable for a 10-ref premium generation) BEFORE we allocate
+            // the reroll's buffers. Without this, the old base64+Buffer +
+            // the new base64+Buffer + SDK internal copies + the ~40 MB
+            // reference context live simultaneously on a 2 GiB container,
+            // causing GC storms that manifest as "[NODE-CRON] missed
+            // execution" and a frozen reroll worker that watchdog
+            // zombie-reclaims after 10 min. Explicit reassignment hints v8
+            // that the old allocations are unreachable.
+            const staleBuffer = resultBuffer;
+            resultBase64 = "";
+            resultBuffer = Buffer.alloc(0);
+            void staleBuffer;
             try {
               // A2: Reroll must also respect the global queue and rate limits
-              resultBase64 = await generationQueue.add(() => 
+              resultBase64 = await generationQueue.add(() =>
                 aiProvider.generateImage(base64Image, mimeType, prompt, mode, additionalImages)
               ) as string;
               resultBuffer = Buffer.from(resultBase64, "base64");
-              // Re-evaluate after reroll (just log, don't reroll again)
-              const rerollGate = await evaluateGeneratedPhoto(
-                base64Image, resultBase64, resultBuffer, mimeType, styleId, id, index
-              );
-              console.log(`[${id}] Image ${index}: reroll result score=${rerollGate.score.overallScore}, pass=${rerollGate.score.overallPass}`);
+              // Intentionally NOT re-invoking evaluateGeneratedPhoto here:
+              //   (a) reroll policy already forbids a second reroll
+              //       (MAX_REROLLS_PER_IMAGE), so the result is logging-only,
+              //   (b) the judge call itself ships ref+generated as base64
+              //       into Vertex (another ~10 MB payload) which is exactly
+              //       the memory pressure we just mitigated.
+              console.log(`[${id}] Image ${index}: reroll completed, accepting output`);
             } catch (rerollErr: any) {
               console.warn(`[${id}] Image ${index}: reroll failed: ${rerollErr.message}, using original`);
             }

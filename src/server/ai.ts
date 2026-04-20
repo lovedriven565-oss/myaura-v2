@@ -25,10 +25,18 @@ export interface IGenerationProvider {
 // project, location` auto-builds the full resource path
 // `projects/.../locations/.../publishers/google/models/<id>` under the hood,
 // so no manual path construction is needed.
-const FREE_MODEL_PRIMARY   = process.env.VERTEX_AI_MODEL_FREE             || process.env.FREE_MODEL_ID             || "gemini-3.1-flash-image-preview";
-const FREE_MODEL_FALLBACK  = process.env.VERTEX_AI_MODEL_FREE_FALLBACK    || process.env.FREE_MODEL_FALLBACK_ID    || "gemini-3.1-flash-image-preview";
+// 2026-04-20 L1 BYPASS: gemini-3.1-flash-image-preview is 404 NOT_FOUND for
+// this project in both europe-west4 AND us-central1 publisher registries,
+// despite appearing in Model Garden. It's not allowlisted for our GCP org.
+// Every L1 attempt burns ~15–30s (primary + regional fallback) before the
+// system degrades to L2. Until Google unblocks the preview model, we skip
+// it entirely and point everything at gemini-2.5-flash-image (confirmed
+// working per logs). Env vars still win so re-enabling is a no-deploy config
+// change when the 3.1 model goes GA.
+const FREE_MODEL_PRIMARY   = process.env.VERTEX_AI_MODEL_FREE             || process.env.FREE_MODEL_ID             || "gemini-2.5-flash-image";
+const FREE_MODEL_FALLBACK  = process.env.VERTEX_AI_MODEL_FREE_FALLBACK    || process.env.FREE_MODEL_FALLBACK_ID    || "gemini-2.5-flash-image";
 const PRO_MODEL_PRIMARY    = process.env.VERTEX_AI_MODEL_PREMIUM          || process.env.PREMIUM_MODEL_ID          || "gemini-3-pro-image-preview";
-const PRO_MODEL_FALLBACK   = process.env.VERTEX_AI_MODEL_PREMIUM_FALLBACK || process.env.PREMIUM_MODEL_FALLBACK_ID || "gemini-3.1-flash-image-preview";
+const PRO_MODEL_FALLBACK   = process.env.VERTEX_AI_MODEL_PREMIUM_FALLBACK || process.env.PREMIUM_MODEL_FALLBACK_ID || "gemini-2.5-flash-image";
 
 // Retry configuration for resilience against 429 rate limits
 const MAX_RETRIES = 2;

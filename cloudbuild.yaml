@@ -32,7 +32,7 @@ steps:
       - '--image'
       - 'gcr.io/$PROJECT_ID/myaura:$COMMIT_SHA'
       - '--region'
-      - 'us-central1'
+      - 'europe-west1'
       - '--platform'
       - 'managed'
       - '--allow-unauthenticated'
@@ -98,9 +98,11 @@ substitutions:
   _VITE_BOT_USERNAME: 'myaura_bot'
   _FREE_MULTI_REF_V2_ENABLED: 'true'  # Server-side counterpart
   _VERTEX_LOCATION: 'global'
-  _VERTEX_AI_MODEL_FREE: 'gemini-3.1-flash-image-preview'
+  # 2026-04-20: gemini-3.1-flash-image-preview is 404 in Publisher Registry
+  # for this project. Pinning to 2.5 until Google unblocks the preview model.
+  _VERTEX_AI_MODEL_FREE: 'gemini-2.5-flash-image'
   _VERTEX_AI_MODEL_PREMIUM: 'gemini-3-pro-image-preview'
-  _JUDGE_MODEL_ID: 'gemini-3.1-flash-image-preview'
+  _JUDGE_MODEL_ID: 'gemini-2.5-flash-image'
   _QUALITY_GATE_ENABLED: 'true'
   _ENABLE_TELEGRAM_BOT: 'true'
 
