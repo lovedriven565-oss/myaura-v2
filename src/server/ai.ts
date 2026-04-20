@@ -1,5 +1,4 @@
 import { GoogleGenAI } from "@google/genai";
-import { GoogleAuth } from "google-auth-library";
 import fs from "fs";
 import path from "path";
 
@@ -8,12 +7,15 @@ export interface IGenerationProvider {
 }
 
 // ─── MyAURA Model Stack (Vertex AI) ─────────────────────────────────────────
-// 2026-04-20 BYPASS: Hardcode models to Gemini 2.5 to skip broken 3.1 404/timeout.
-// Env overrides are temporarily ignored to unblock production.
-const FREE_MODEL_PRIMARY   = "gemini-2.5-flash-image";
-const FREE_MODEL_FALLBACK  = "gemini-2.5-flash-image";
-const PRO_MODEL_PRIMARY    = "gemini-3-pro-image-preview";
-const PRO_MODEL_FALLBACK   = "gemini-2.5-flash-image";
+// v3.4 PRO-FIX (2026-04-21):
+//   Premium tier MUST use gemini-3-pro-image-preview (approved quota on
+//   myaura-production-492012). Free tier uses gemini-2.5-flash-image.
+//   No Imagen fallbacks — Imagen has been unstable in production and was
+//   crashing the event loop via 500 Internal Error + "fetch failed
+//   (other side closed)" leading to SIGTERM. If L1 fails, we fail gracefully
+//   and surface the error upstream.
+const FREE_MODEL_PRIMARY = "gemini-2.5-flash-image";
+const PRO_MODEL_PRIMARY  = "gemini-3-pro-image-preview";
 
 // Retry configuration for resilience against 429 rate limits
 const MAX_RETRIES = 2;
@@ -103,45 +105,26 @@ async function printDiagnosticIdentity() {
 printDiagnosticIdentity().catch(() => {});
 
 //
-// ─── Regional availability note (Phase 2 hotfix) ────────────────────────────
-// Gemini image-preview and flash models (gemini-2.5-flash-image,
-// gemini-3-pro-image-preview) are NOT published in europe-west1 — calls
-// there return 403 "Permission denied or model may not exist", which we
-// previously misdiagnosed as an IAM misconfiguration.
-//
-// The canonical region for this model family in the EU is europe-west4
-// (Netherlands). We therefore:
-//   1. Default to europe-west4 when no env var is set.
-//   2. Honour VERTEX_AI_LOCATION (and legacy VERTEX_LOCATION) when it points
-//      at a region we trust.
-//   3. EXPLICITLY REMAP europe-west1 → europe-west4 with a warn-log, because
-//      every current Cloud Run deploy has `VERTEX_AI_LOCATION=europe-west1`
-//      baked in and flipping that env var cleanly requires a redeploy. This
-//      override is the fast path; operators should still update the env var.
-//
-// If we ever need a different region (e.g. us-central1 for a new model), add
-// it to the allow-list below rather than broadening the override.
+// ─── Regional availability (v3.4 PRO-FIX) ───────────────────────────────────
+// Vertex AI quota is STRICTLY region-bound. The Premium project
+// (myaura-production-492012) has approved gemini-3-pro-image-preview quota
+// in EU regions, so we default to europe-west4 (canonical for 3.x image-
+// preview models). Operators can pin a specific region via
+// VERTEX_AI_LOCATION / VERTEX_LOCATION. We NO LONGER force a hard override
+// to us-central1 — that is what caused the "location='us-central1' 404"
+// regression.
 const VERTEX_AI_REGION_ALLOWLIST = new Set<string>([
   'europe-west4', // canonical EU region for gemini-3.x image-preview models
+  'europe-west1', // secondary EU region
   'us-central1',  // canonical US fallback — keep handy for emergencies
 ]);
-const VERTEX_AI_DEFAULT_REGION = 'us-central1';
+const VERTEX_AI_DEFAULT_REGION = 'europe-west4';
 
 function resolveVertexLocation(): string {
   const raw = (process.env.VERTEX_AI_LOCATION || process.env.VERTEX_LOCATION || '').trim();
 
   if (!raw) {
     console.log(`[ai] VERTEX_AI_LOCATION unset → using default ${VERTEX_AI_DEFAULT_REGION}`);
-    return VERTEX_AI_DEFAULT_REGION;
-  }
-
-  // Legacy env var still set to europe-west1: swap in code to avoid a redeploy
-  // just to flip a string. Warn loudly so operators notice.
-  if (raw === 'europe-west1' || raw === 'europe-west4') {
-    console.warn(
-      `[ai] VERTEX_AI_LOCATION=${raw} is overridden to ${VERTEX_AI_DEFAULT_REGION} for diagnostic purposes. ` +
-      `Update the env var on Cloud Run to silence this warning.`
-    );
     return VERTEX_AI_DEFAULT_REGION;
   }
 
@@ -156,13 +139,9 @@ function resolveVertexLocation(): string {
   return raw;
 }
 
-// [v3.3-NANO-BANANA-ADMIN] ACTIVE REGION: us-central1 (Hard Override)
-const VERTEX_LOCATION = "us-central1";
-console.log(`[ai] [v3.3-NANO-BANANA-ADMIN] ACTIVE REGION: ${VERTEX_LOCATION}`);
-
-// Verified Model IDs in us-central1 for this project:
-const L2_STABILITY_MODEL = "imagen-3.0-generate-001";
-const L3_SAFETY_NET_MODEL = "imagen-3.0-generate-001";
+// [v3.4-PRO-FIX] ACTIVE REGION: resolve from environment (prefer europe-west4)
+const VERTEX_LOCATION = resolveVertexLocation();
+console.log(`[ai] [v3.4-PRO-FIX] ACTIVE REGION: ${VERTEX_LOCATION}`);
 
 // Project ID for ADC (Application Default Credentials) mode. When Cloud Run
 // runs us without service-account JSON keys in ./keys, we must still tell the
@@ -237,7 +216,7 @@ function createEphemeralClient(slot: KeySlot, signal: AbortSignal, locationOverr
     const prev = process.env.GOOGLE_APPLICATION_CREDENTIALS;
     process.env.GOOGLE_APPLICATION_CREDENTIALS = slot.keyPath;
     opts.project = slot.projectId;
-    console.log(`[Diagnostic] [v3.2-US-FIX] createEphemeralClient (JSON key ${slot.keyHint}): using project='${opts.project}', location='${targetLocation}'`);
+    console.log(`[Diagnostic] [v3.4-PRO-FIX] createEphemeralClient (JSON key ${slot.keyHint}): using project='${opts.project}', location='${targetLocation}', apiVersion='${targetApiVersion}'`);
     const client = new GoogleGenAI(opts);
     if (prev !== undefined) {
       process.env.GOOGLE_APPLICATION_CREDENTIALS = prev;
@@ -257,7 +236,7 @@ function createEphemeralClient(slot: KeySlot, signal: AbortSignal, locationOverr
     );
   }
   opts.project = VERTEX_ADC_PROJECT;
-  console.log(`[Diagnostic] [v3.2-US-FIX] createEphemeralClient (ADC): using project='${opts.project}', location='${targetLocation}'`);
+  console.log(`[Diagnostic] [v3.4-PRO-FIX] createEphemeralClient (ADC): using project='${opts.project}', location='${targetLocation}', apiVersion='${targetApiVersion}'`);
   return new GoogleGenAI(opts);
 }
 
@@ -417,7 +396,7 @@ export class VertexAIProvider implements IGenerationProvider {
     } catch (err: any) {
       clearTimeout(timeoutId);
       // DIAGNOSTIC: Log the exact error payload from Vertex AI
-      console.log(`[Diagnostic] [v3.2-US-FIX] Vertex AI _callModel Error for ${modelId} in ${locationOverride || VERTEX_LOCATION}:`);
+      console.log(`[Diagnostic] [v3.4-PRO-FIX] Vertex AI _callModel Error for ${modelId} in ${locationOverride || VERTEX_LOCATION}:`);
       console.log(`  - message: ${err?.message}`);
       const reason = err?.reason || err?.error?.reason || (err?.details && err?.details[0]?.reason);
       console.log(`  - reason: ${reason}`);
@@ -440,94 +419,20 @@ export class VertexAIProvider implements IGenerationProvider {
     }
   }
 
-  private async _callModelWithRegionFallback(slot: KeySlot, modelId: string, contents: any[], mode: 'preview' | 'premium', apiVersion?: string): Promise<string> {
-    try {
-      return await this._callModel(slot, modelId, contents, mode, VERTEX_LOCATION, apiVersion);
-    } catch (err: any) {
-      const errMsg: string = err?.message || "";
-      const errDetails = err?.details || [];
-      const errBlob = [errMsg, stringifyErrorDetails(errDetails), stringifyErrorDetails(err?.error), stringifyErrorDetails(err)].join(" ");
-      const { isModelPermission } = classifyError(err, errMsg, errDetails, errBlob);
-
-      // If we got a 403 on the primary region (e.g. europe-west4), try us-central1 as a last resort
-      // before giving up to the fallback chain.
-      if (isModelPermission && VERTEX_LOCATION !== 'us-central1') {
-        console.warn(`[Region Fallback] 403 denied for ${modelId} in ${VERTEX_LOCATION}. Auto-retrying explicitly in us-central1...`);
-        return await this._callModel(slot, modelId, contents, mode, 'us-central1', apiVersion);
-      }
-
-      throw err;
-    }
-  }
-
   /**
-   * Call Imagen via the `:predict` endpoint. Imagen models are NOT accessible
-   * via generateContent — they require the classic Vertex AI predict API with
-   * an `instances` array.
+   * v3.4 PRO-FIX: No cross-region fallback. Quota is strictly region-bound.
+   * If the configured region fails, there is no reason to believe another
+   * region will succeed (different quota, different IAM, different model
+   * availability). Surface the error so the caller sees the real failure.
    */
-  private async _callImagenPredict(modelId: string, prompt: string, additionalImages?: string[]): Promise<string> {
-    const auth = new GoogleAuth({
-      scopes: ['https://www.googleapis.com/auth/cloud-platform'],
-    });
-    const client = await auth.getClient();
-    const tokenRes = await client.getAccessToken();
-    const token = tokenRes.token;
-    if (!token) throw new Error(`[Imagen] Failed to obtain access token for ${modelId}`);
-
-    const project = VERTEX_ADC_PROJECT;
-    if (!project) throw new Error(`[Imagen] VERTEX_ADC_PROJECT not set`);
-
-    const url = `https://${VERTEX_LOCATION}-aiplatform.googleapis.com/v1/projects/${project}/locations/${VERTEX_LOCATION}/publishers/google/models/${modelId}:predict`;
-
-    const body = {
-      instances: [{ prompt }],
-      parameters: {
-        sampleCount: 1,
-        aspectRatio: "1:1",
-        safetyFilterLevel: "block_only_high",
-        personGeneration: "allow_adult",
-      },
-    };
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), DEFAULT_CALL_TIMEOUT_MS);
-
-    try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-      clearTimeout(timeoutId);
-
-      if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(`[Imagen:predict] HTTP ${res.status}: ${errText.slice(0, 500)}`);
-      }
-
-      const data: any = await res.json();
-      const base64 = data?.predictions?.[0]?.bytesBase64Encoded;
-      if (!base64) {
-        throw new Error(`[Imagen:predict] No image in response: ${JSON.stringify(data).slice(0, 300)}`);
-      }
-      return base64;
-    } catch (err: any) {
-      clearTimeout(timeoutId);
-      if (err?.name === 'AbortError' || controller.signal.aborted) {
-        throw Object.assign(new Error(`[Imagen:predict TIMEOUT] ${modelId}`), { isTimeout: true });
-      }
-      throw err;
-    }
+  private async _callModelNoFallback(slot: KeySlot, modelId: string, contents: any[], mode: 'preview' | 'premium', apiVersion?: string): Promise<string> {
+    return this._callModel(slot, modelId, contents, mode, VERTEX_LOCATION, apiVersion);
   }
 
   private async _generate(slot: KeySlot, originalImageBase64: string, mimeType: string, prompt: string, mode: 'preview' | 'premium', additionalImages?: string[], apiVersion?: string): Promise<string> {
     const tier = mode === 'premium' ? 'PREMIUM' : 'FREE';
 
-    // Build multimodal contents (L1 and L2 are Gemini models — accept image inputs + text prompt)
+    // Build multimodal contents
     const FREE_V2 = process.env.FREE_MULTI_REF_V2_ENABLED === "true";
     const contents: any[] = [];
     contents.push({ inlineData: { data: originalImageBase64, mimeType } });
@@ -538,48 +443,35 @@ export class VertexAIProvider implements IGenerationProvider {
     }
     contents.push({ text: prompt });
 
-    // ─── L1: PRIMARY (Tier-based Gemini) ─────────────────────────
+    // ─── L1 ONLY (tier-based Gemini; no Imagen fallback) ───────────────────
+    // Imagen fallbacks were removed in v3.4 — they were throwing 500s and
+    // "fetch failed (other side closed)" which crashed the event loop and
+    // triggered SIGTERM on Cloud Run. Fail fast instead.
     const l1Model = mode === 'premium' ? PRO_MODEL_PRIMARY : FREE_MODEL_PRIMARY;
-    console.log(`[v3.3-NANO-BANANA-ADMIN] [Tier: ${tier}] L1 → ${l1Model} (${apiVersion || 'v1'}) | key ...${slot.keyHint}`);
+
+    // Preview models (gemini-3-pro-image-preview) require v1beta1 on Vertex AI.
+    // Non-preview GA models stay on v1. Honour explicit env override above all.
+    const envApiVersion = (process.env.VERTEX_AI_API_VERSION || '').trim();
+    const effectiveApiVersion = envApiVersion
+      ? envApiVersion
+      : (l1Model.includes('preview') ? 'v1beta1' : (apiVersion || 'v1'));
+
+    console.log(`[v3.4-PRO-FIX] [Tier: ${tier}] L1 → ${l1Model} (${effectiveApiVersion}) | region=${VERTEX_LOCATION} | key ...${slot.keyHint}`);
+
     try {
-      const result = await this._callModelWithRegionFallback(slot, l1Model, contents, mode, apiVersion);
-      console.log(`[v3.3-NANO-BANANA-ADMIN] L1 SUCCESS | model=${l1Model}`);
+      const result = await this._callModelNoFallback(slot, l1Model, contents, mode, effectiveApiVersion);
+      console.log(`[v3.4-PRO-FIX] L1 SUCCESS | model=${l1Model}`);
       return result;
     } catch (l1Err: any) {
       const l1Msg = l1Err?.message || "";
       const l1Cls = classifyError(l1Err, l1Msg, l1Err?.details || [], [l1Msg, stringifyErrorDetails(l1Err)].join(" "));
 
-      // 429/billing short-circuit: apply cooldowns, then still cascade
+      // 429/billing short-circuit: apply cooldowns (for key rotation / retry policy)
       if (l1Cls.isBilling) markKey24hCooldown(slot, 'L1 billing disabled');
       else if (l1Cls.is429) markKeyCooldown(slot);
 
-      console.warn(`[v3.3-NANO-BANANA-ADMIN] L1 ${l1Model} failed (${l1Msg.slice(0, 120)}) → L2 ${L2_STABILITY_MODEL}`);
-
-      // ─── L2: STABILITY (Gemini 2.5 Flash Image — VERIFIED WORKING) ─────
-      try {
-        const result = await this._callModel(slot, L2_STABILITY_MODEL, contents, mode, VERTEX_LOCATION, apiVersion);
-        console.log(`[v3.3-NANO-BANANA-ADMIN] L2 SUCCESS | model=${L2_STABILITY_MODEL}`);
-        return result;
-      } catch (l2Err: any) {
-        const l2Msg = l2Err?.message || "";
-        const l2Cls = classifyError(l2Err, l2Msg, l2Err?.details || [], [l2Msg, stringifyErrorDetails(l2Err)].join(" "));
-        if (l2Cls.isBilling) markKey24hCooldown(slot, 'L2 billing disabled');
-        else if (l2Cls.is429) markKeyCooldown(slot);
-
-        console.warn(`[v3.3-NANO-BANANA-ADMIN] L2 ${L2_STABILITY_MODEL} failed (${l2Msg.slice(0, 120)}) → L3 ${L3_SAFETY_NET_MODEL}`);
-
-        // ─── L3: SAFETY NET (Imagen 3.0 via :predict endpoint) ──────────
-        try {
-          const result = await this._callImagenPredict(L3_SAFETY_NET_MODEL, prompt, additionalImages);
-          console.log(`[v3.3-NANO-BANANA-ADMIN] L3 SUCCESS | model=${L3_SAFETY_NET_MODEL} (:predict)`);
-          return result;
-        } catch (l3Err: any) {
-          const l3Msg = l3Err?.message || "";
-          console.error(`[v3.3-NANO-BANANA-ADMIN] L3 ${L3_SAFETY_NET_MODEL} failed (${l3Msg.slice(0, 200)})`);
-          console.error(`[v3.3-NANO-BANANA-ADMIN] FATAL: Full fallback chain exhausted (L1 → L2 → L3). Last err: ${l3Msg.slice(0, 200)}`);
-          throw new Error(`[v3.3] All image generation models failed. L1=${l1Msg.slice(0,80)} | L2=${l2Msg.slice(0,80)} | L3=${l3Msg.slice(0,80)}`);
-        }
-      }
+      console.error(`[v3.4-PRO-FIX] L1 ${l1Model} FATAL in ${VERTEX_LOCATION} (${l1Msg.slice(0, 200)})`);
+      throw new Error(`[v3.4] Generation failed on ${l1Model}@${VERTEX_LOCATION}: ${l1Msg.slice(0, 150)}`);
     }
   }
 }
