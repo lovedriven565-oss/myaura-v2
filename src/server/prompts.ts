@@ -23,25 +23,28 @@ export interface DebugPromptParts {
   index: number;
 }
 
-// ─── V12 "Geometry Lock" Architecture ──────────────────────────────────────
+// ─── V13 "Anatomical" Architecture ───────────────────────────────────────────
 //
 // Design philosophy:
-//   1. CAMERA-FIRST MEDIUM OVERRIDE. The very first tokens force the model into
-//      "raw photo" mode: "Authentic candid photograph, raw unretouched skin
-//      texture, visible pores, natural facial imperfections, direct flash lighting,
-//      extremely high detail". This kills the plastic/CGI bias at token 0.
+//   1. REFERENCE-FIRST STRUCTURE. Hair Lock and Jawline Lock appear EARLY in the
+//      prompt (immediately after medium override) so they receive maximum token
+//      weight and override style-driven idealisation.
 //
-//   2. STRICT GEOMETRY ANCHORS in CAPS. PRESERVE EXACT HAIRCUT GEOMETRY AND
-//      TEXTURE FROM REFERENCE is an all-caps mandate that overrides the model's
-//      tendency to standardise hairstyles per style (e.g. Corporate).
+//   2. HAIR LOCK — DEDICATED BLOCK. Explicit, redundant haircut description
+//      (shaved sides, buzzed top, receding temples) prevents the model from
+//      substituting a generic corporate hairstyle. Redundancy is a fix for bias.
 //
-//   3. PUNCHY COMMA-SEPARATED KEYWORDS only. No flowing sentences, no narrative
-//      descriptions. Each tag is a discrete visual constraint the model parses
-//      independently. This prevents "reasoning" the face into a beauty filter.
+//   3. JAWLINE LOCK — DEDICATED BLOCK. "Un-retouched natural jawline, preserve
+//      original face width, do not sharpen chin" anchors the subject's unique
+//      bone structure and prevents chin elongation / contouring.
 //
-//   4. COMPRESSED NEGATIVE PROMPT. Only the critical anti-plastic anchors remain:
-//      altered face geometry, smooth skin, beauty filter, different haircut.
-//      Vertex AI parses short negative lists more reliably than long litanies.
+//   4. STYLE DILUTION. Corporate/Business keywords are reduced to neutral tags
+//      ("formal business setting, professional attire") instead of CEO-tier
+//      authority language that triggers model bias toward perfect hair and
+//      sharpened jawlines.
+//
+//   5. PUNCHY COMMA-SEPARATED KEYWORDS. No flowing sentences. Each tag is a
+//      discrete visual constraint parsed independently.
 
 export const CORE_STYLES: readonly StyleId[] = Object.freeze([
   "business",
@@ -106,9 +109,9 @@ const STYLE_BLOCKS: Record<StyleId, StyleBlock> = {
     mood: "futuristic, kinetic, blade-runner atmosphere",
   },
   corporate: {
-    subject: "impeccable charcoal suit, conservative tie, hands composed, boardroom posture",
-    environment: "Fortune-500 executive suite, floor-to-ceiling window skyline, brushed-metal desk details",
-    mood: "CEO-tier authority, institutional trust, LinkedIn-executive polish",
+    subject: "formal business setting, professional attire, conservative dark suit, minimal styling, neutral posture",
+    environment: "modern office backdrop, neutral lighting, clean background, subtle desk detail",
+    mood: "professional, understated, formal",
   },
   ethereal: {
     subject: "diaphanous pale fabric, serene expression, gentle chiaroscuro on the face",
@@ -126,13 +129,25 @@ const VARIETY_FRAMINGS = [
   "relaxed posture three-quarter portrait",
 ];
 
-// ── V12 Medium Override: forces "photo" mode at token 0 ───────────────────
+// ── V13 Medium Override: forces "photo" mode at token 0 ───────────────────
 const MEDIUM_OVERRIDE =
   "Authentic candid photograph, raw unretouched skin texture, visible pores, natural facial imperfections, " +
   "direct flash lighting, extremely high detail";
 
-// ── V12 Identity Anchors: strict geometry fixation ────────────────────────
-function buildGeometryLock(ageTier: AgeTier): string {
+// ── V13 Hair Lock — redundant, explicit haircut description ─────────────────
+const HAIR_LOCK =
+  "shaved sides, very short buzzed top, natural receding hairline at temples, " +
+  "NO added hair volume, exact hair texture from reference, no hairstyle standardization, " +
+  "preserve reference haircut geometry, no hairline lowering, no hair density increase";
+
+// ── V13 Jawline Lock — dedicated bone-structure anchor ──────────────────────
+const JAWLINE_LOCK =
+  "un-retouched natural jawline, preserve original face width, do not sharpen chin, " +
+  "no chin elongation, no jawline contouring, original mandible geometry, " +
+  "no V-line shaping, no masseter reduction, no chin implant simulation";
+
+// ── V13 Identity Anchors: strict geometry fixation ────────────────────────
+function buildAnatomicalLock(ageTier: AgeTier): string {
   const ageLock =
     ageTier === "young"
       ? "young adult age lock"
@@ -141,16 +156,16 @@ function buildGeometryLock(ageTier: AgeTier): string {
       : "distinguished adult age lock";
 
   return [
+    HAIR_LOCK,
+    JAWLINE_LOCK,
     "Extreme facial likeness to reference",
     "strict adherence to reference facial bone structure",
-    "preserve original jawline geometry and cheekbone height",
-    "PRESERVE EXACT HAIRCUT GEOMETRY AND TEXTURE FROM REFERENCE",
-    "no hair volume alteration",
+    "preserve original cheekbone height",
     ageLock,
   ].join(", ");
 }
 
-// ── V12 Demographics: gender + expression + catchlights only ─────────────────
+// ── V13 Demographics: gender + expression + catchlights only ─────────────────
 function buildDemographics(gender: Gender, ageTier: AgeTier): string {
   const genderTag =
     gender === "male"
@@ -169,13 +184,14 @@ function buildDemographics(gender: Gender, ageTier: AgeTier): string {
   return `${genderTag}, natural expression, realistic Catchlights, ${ageTag}`;
 }
 
-// ── V12 Negative Prompt: compressed critical anchors only ──────────────────
+// ── V13 Negative Prompt: compressed critical anchors only ──────────────────
 const NEGATIVE_PROMPT =
   "different person, smooth skin, beauty filter, altered face geometry, different haircut, " +
   "different hair texture, extra hair volume, plastic face, CGI, 3D render, cartoon, " +
-  "digital makeup, teeth whitening, jawline sharpening, asymmetry correction, over-optimization";
+  "digital makeup, teeth whitening, jawline sharpening, chin elongation, asymmetry correction, " +
+  "over-optimization, hairline lowering, hair density increase, V-line jaw, masseter reduction";
 
-function buildV12Prompt(
+function buildV13Prompt(
   gender: Gender,
   styleId: StyleId,
   ageTier: AgeTier,
@@ -184,13 +200,14 @@ function buildV12Prompt(
 ): string {
   const styleBlock = STYLE_BLOCKS[styleId] || STYLE_BLOCKS.business;
   const framing = VARIETY_FRAMINGS[index % VARIETY_FRAMINGS.length];
-  const geometryLock = buildGeometryLock(ageTier);
+  const anatomicalLock = buildAnatomicalLock(ageTier);
   const demographics = buildDemographics(gender, ageTier);
 
-  // V12 cascade: Medium Override → Geometry Lock → Demographics → Framing → Subject → Environment → Mood
+  // V13 Reference-First cascade:
+  // Medium Override → Anatomical Lock (Hair + Jawline) → Demographics → Framing → Subject → Environment → Mood
   return [
     MEDIUM_OVERRIDE,
-    geometryLock,
+    anatomicalLock,
     demographics,
     framing,
     styleBlock.subject,
@@ -210,11 +227,11 @@ export function buildPromptProfile(
   ageTier: AgeTier = "young",
   gender: Gender = "unset",
 ): { positivePrompt: string; negativePrompt: string; debugPromptParts: DebugPromptParts } {
-  const positivePrompt = buildV12Prompt(gender, styleId, ageTier, mode, index);
+  const positivePrompt = buildV13Prompt(gender, styleId, ageTier, mode, index);
   const negativePrompt = buildNegativePrompt(mode);
 
   const debugPromptParts: DebugPromptParts = {
-    version: "V12-GeometryLock",
+    version: "V13-Anatomical",
     styleId,
     mode,
     gender,
@@ -223,7 +240,7 @@ export function buildPromptProfile(
   };
 
   console.log(
-    `[PROMPT V12-GeometryLock] style=${styleId} mode=${mode} gender=${gender} age=${ageTier} idx=${index}`,
+    `[PROMPT V13-Anatomical] style=${styleId} mode=${mode} gender=${gender} age=${ageTier} idx=${index}`,
   );
   return { positivePrompt, negativePrompt, debugPromptParts };
 }

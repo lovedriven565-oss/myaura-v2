@@ -17,6 +17,7 @@ export interface IGenerationProvider {
 //   Tier differentiation lives in OUTPUT VOLUME, EXCLUSIVE STYLES, REFERENCE
 //   DEPTH, and TEMPERATURE — NOT in model choice.
 const UNIFIED_MODEL = "gemini-3.1-flash-image-preview";
+const IMAGEN_3_MODEL = "imagen-3.0-generate-001";
 
 // Retry configuration for resilience against 429 rate limits
 const MAX_RETRIES = 2;
@@ -454,7 +455,7 @@ export class VertexAIProvider implements IGenerationProvider {
           // @ts-ignore
           responseModalities: ["IMAGE"],
           safetySettings: SAFETY_SETTINGS,
-          temperature: mode === 'premium' ? 0.2 : 0.4,
+          temperature: mode === 'premium' ? 0.1 : 0.4,
           topP: mode === 'premium' ? 0.9 : 0.95,
         },
       } as any);
@@ -504,10 +505,127 @@ export class VertexAIProvider implements IGenerationProvider {
     return this._callModel(slot, modelId, contents, mode, VERTEX_LOCATION, apiVersion);
   }
 
+  /**
+   * v4.1 IMAGEN-3 PIVOT: For Premium tier, attempt Imagen 3 via REST API first.
+   * Imagen 3 has superior subject-fidelity (haircut preservation, jawline
+   * adherence) but requires a different endpoint (predict) and body format.
+   * If IAM/404/transport fails, we immediately fall back to the unified
+   * flash model so the batch never hard-fails.
+   */
+  private async _callImagen3(
+    slot: KeySlot,
+    prompt: string,
+    originalImageBase64: string,
+    mimeType: string,
+    additionalImages?: string[],
+  ): Promise<string> {
+    const { GoogleAuth } = await import('google-auth-library');
+
+    const auth = new GoogleAuth({
+      keyFile: slot.isAdc ? undefined : slot.keyPath,
+      scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+      projectId: slot.projectId || VERTEX_ADC_PROJECT,
+    });
+    const client = await auth.getClient();
+    const accessToken = await client.getAccessToken();
+
+    // Imagen 3 predict endpoint requires a regional location, not "global"
+    const location = VERTEX_LOCATION === 'global' ? 'us-central1' : VERTEX_LOCATION;
+    const url = `https://${location}-aiplatform.googleapis.com/v1/projects/${slot.projectId || VERTEX_ADC_PROJECT}/locations/${location}/publishers/google/models/${IMAGEN_3_MODEL}:predict`;
+
+    const referenceImages: any[] = [{
+      referenceType: "REFERENCE_TYPE_SUBJECT",
+      referenceId: 1,
+      referenceImage: {
+        bytesBase64Encoded: originalImageBase64,
+        mimeType,
+      },
+      subjectType: "SUBJECT_TYPE_PERSON",
+    }];
+
+    if (additionalImages && additionalImages.length > 0) {
+      additionalImages.forEach((img, idx) => {
+        referenceImages.push({
+          referenceType: "REFERENCE_TYPE_SUBJECT",
+          referenceId: idx + 2,
+          referenceImage: {
+            bytesBase64Encoded: img,
+            mimeType,
+          },
+          subjectType: "SUBJECT_TYPE_PERSON",
+        });
+      });
+    }
+
+    const body = {
+      instances: [{ prompt }],
+      parameters: {
+        sampleCount: 1,
+        aspectRatio: "9:16",
+        personGeneration: "allow_all",
+        referenceImages,
+      },
+    };
+
+    const fetch = (await import('node-fetch')).default || globalThis.fetch;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Imagen 3 predict failed: ${response.status} ${errorText}`);
+    }
+
+    const data = await response.json() as any;
+    const predictions = data.predictions || [];
+    if (predictions.length === 0) {
+      throw new Error('Imagen 3 returned no predictions');
+    }
+
+    const imageData = predictions[0]?.bytesBase64Encoded;
+    if (!imageData) {
+      throw new Error('Imagen 3 prediction missing image data');
+    }
+    return imageData;
+  }
+
   private async _generate(slot: KeySlot, originalImageBase64: string, mimeType: string, prompt: string, mode: 'preview' | 'premium', additionalImages?: string[], apiVersion?: string): Promise<string> {
     const tier = mode === 'premium' ? 'PREMIUM' : 'FREE';
 
-    // Build multimodal contents
+    // ─── Premium: attempt Imagen 3 first (superior subject fidelity) ─────────
+    if (mode === 'premium') {
+      console.log(`[v4.1-IMAGEN-3] [Tier: PREMIUM] Attempting ${IMAGEN_3_MODEL} | key ...${slot.keyHint}`);
+      try {
+        const result = await withNetworkRetry(
+          () => this._callImagen3(slot, prompt, originalImageBase64, mimeType, additionalImages),
+          `Imagen3@${VERTEX_LOCATION}`,
+        );
+        console.log(`[v4.1-IMAGEN-3] SUCCESS → image returned`);
+        return result;
+      } catch (imagenErr: any) {
+        const imagenMsg = imagenErr?.message || "";
+        const imagenCls = classifyError(imagenErr, imagenMsg, imagenErr?.details || [], [imagenMsg, stringifyErrorDetails(imagenErr)].join(" "));
+
+        // IAM / 404 / model not enabled → fall through to flash, do NOT throw
+        if (imagenCls.isModelPermission || imagenCls.isNotFound || imagenCls.isBilling) {
+          console.warn(`[v4.1-IMAGEN-3] ${IMAGEN_3_MODEL} unavailable (${imagenMsg.slice(0, 160)}). Falling back to flash.`);
+        } else if (imagenCls.is429) {
+          markKeyCooldown(slot);
+          console.warn(`[v4.1-IMAGEN-3] 429 on ${IMAGEN_3_MODEL}. Falling back to flash.`);
+        } else {
+          console.warn(`[v4.1-IMAGEN-3] ${IMAGEN_3_MODEL} failed (${imagenMsg.slice(0, 160)}). Falling back to flash.`);
+        }
+        // Intentional fall-through to flash fallback below
+      }
+    }
+
+    // Build multimodal contents for Gemini flash fallback
     const FREE_V2 = process.env.FREE_MULTI_REF_V2_ENABLED === "true";
     const contents: any[] = [];
     contents.push({ inlineData: { data: originalImageBase64, mimeType } });
@@ -518,39 +636,29 @@ export class VertexAIProvider implements IGenerationProvider {
     }
     contents.push({ text: prompt });
 
-    // ─── L1 ONLY (unified flash model) ─────────────────────────────────────
-    // v4.0: Both tiers use gemini-3.1-flash-image-preview. Differentiation is
-    // through prompt volume, style exclusivity, reference depth, temperature.
+    // ─── L1: unified flash model (free + premium fallback) ─────────────────
     const l1Model = UNIFIED_MODEL;
-
-    // Preview models REQUIRE v1beta1 and location=global on Vertex AI.
     const effectiveApiVersion = 'v1beta1';
     const effectiveLocation = VERTEX_AI_PREVIEW_LOCATION;
 
-    console.log(`[v4.0-FLASH-PIVOT] [Tier: ${tier}] L1 → ${l1Model} (${effectiveApiVersion}) | region=${effectiveLocation} | key ...${slot.keyHint}`);
+    console.log(`[v4.1-FLASH-FALLBACK] [Tier: ${tier}] L1 → ${l1Model} (${effectiveApiVersion}) | region=${effectiveLocation} | key ...${slot.keyHint}`);
 
     try {
-      // v3.6: Wrap in withNetworkRetry to absorb transient Vertex transport
-      // failures (fetch failed / other side closed / 500 / 503 / socket hang
-      // up). Two retries, 10s apart. The underlying AbortController timeout
-      // still fires at MODEL_CALL_TIMEOUT_MS per attempt, so worst-case
-      // latency per image is bounded by ~3 * 120s + 2 * 10s = 380s on Pro.
       const result = await withNetworkRetry(
         () => this._callModel(slot, l1Model, contents, mode, effectiveLocation, effectiveApiVersion),
         `L1 ${l1Model}@${effectiveLocation}`,
       );
-      console.log(`[v4.0-FLASH-PIVOT] L1 SUCCESS | model=${l1Model}@${effectiveLocation}`);
+      console.log(`[v4.1-FLASH-FALLBACK] L1 SUCCESS | model=${l1Model}@${effectiveLocation}`);
       return result;
     } catch (l1Err: any) {
       const l1Msg = l1Err?.message || "";
       const l1Cls = classifyError(l1Err, l1Msg, l1Err?.details || [], [l1Msg, stringifyErrorDetails(l1Err)].join(" "));
 
-      // 429/billing short-circuit: apply cooldowns (for key rotation / retry policy)
       if (l1Cls.isBilling) markKey24hCooldown(slot, 'L1 billing disabled');
       else if (l1Cls.is429) markKeyCooldown(slot);
 
-      console.error(`[v4.0-FLASH-PIVOT] L1 ${l1Model} FATAL in ${effectiveLocation} (${l1Msg.slice(0, 200)})`);
-      throw new Error(`[v4.0] Generation failed on ${l1Model}@${effectiveLocation}: ${l1Msg.slice(0, 150)}`);
+      console.error(`[v4.1-FLASH-FALLBACK] L1 ${l1Model} FATAL in ${effectiveLocation} (${l1Msg.slice(0, 200)})`);
+      throw new Error(`[v4.1] Generation failed on ${l1Model}@${effectiveLocation}: ${l1Msg.slice(0, 150)}`);
     }
   }
 }
@@ -583,7 +691,7 @@ export class GeminiProvider implements IGenerationProvider {
           // @ts-ignore
           responseModalities: ["TEXT", "IMAGE"],
           safetySettings: SAFETY_SETTINGS,
-          temperature: mode === 'premium' ? 0.2 : 0.4,
+          temperature: mode === 'premium' ? 0.1 : 0.4,
           topP: mode === 'premium' ? 0.9 : 0.95,
         },
       } as any);
