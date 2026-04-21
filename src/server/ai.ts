@@ -30,6 +30,7 @@
 import { GoogleGenAI } from "@google/genai";
 import fs from "fs";
 import path from "path";
+import { NEGATIVE_PROMPT } from "./prompts";
 
 // ─── Public Interface ───────────────────────────────────────────────────────
 
@@ -375,11 +376,12 @@ export class VertexAIProvider implements IGenerationProvider {
     try {
       const client = createClient(slot, controller.signal, FLASH_LOCATION, FLASH_API_VERSION);
 
-      // Multimodal payload: image parts first, then text prompt.
+      // Multimodal payload: image parts first, then text prompt with negative instructions.
       const contents: any[] = refs.map(r => ({
         inlineData: { data: r.base64, mimeType: r.mimeType },
       }));
-      contents.push({ text: prompt });
+      const promptWithNegative = `${prompt} Do NOT generate: ${NEGATIVE_PROMPT}.`;
+      contents.push({ text: promptWithNegative });
 
       const response = await client.models.generateContent({
         model: FLASH_MODEL,
@@ -469,6 +471,7 @@ export class VertexAIProvider implements IGenerationProvider {
           sampleCount: 1,
           aspectRatio: "9:16",
           personGeneration: "allow_all",
+          negativePrompt: NEGATIVE_PROMPT,
           referenceImages: [...subjectRefs, faceMeshRef],
         },
       };

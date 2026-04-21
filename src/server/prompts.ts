@@ -152,6 +152,15 @@ const TEXTURE_INJECTION_MODULE =
   "Sharp focus on skin surface with gentle depth falloff. No retouching, no " +
   "foundation — raw, natural skin with realistic subsurface scattering.";
 
+// ─── V6.1 Photorealism Anchor (both tiers, prepended) ────────────────────────
+const PHOTO_REALISM_ANCHOR =
+  "Live-action cinematography, hyper-realistic photography of a real human being, " +
+  "shot on 85mm lens, realistic skin texture. The subject is in a ";
+
+// ─── V6.1 Negative Prompt (blocks CGI/cartoon generation) ───────────────────
+export const NEGATIVE_PROMPT =
+  "cartoon, 3d render, CGI, anime, illustration, painting, digital art, video game graphics, plastic skin, doll, artificial, stylized, caricature";
+
 // ─── FREE tier (formulaic, fast) ───────────────────────────────────────────
 /**
  * "A cinematic portrait of the person in the style of [Style]. [Environment].
@@ -161,8 +170,10 @@ export function buildFreePrompt(styleId: StyleId, index: number = 0): string {
   const block = STYLE_BLOCKS[styleId] || STYLE_BLOCKS.business;
   const framing = FRAMINGS[index % FRAMINGS.length];
   return (
-    `A cinematic ${framing} of the person in the style of ${block.label}. ` +
-    `${block.environment}. High resolution, 4k, masterpiece, super details.`
+    PHOTO_REALISM_ANCHOR +
+    `${block.environment} environment. ` +
+    `A cinematic ${framing} of the person. ` +
+    `High resolution, 4k, photorealistic details.`
   );
 }
 
@@ -174,6 +185,7 @@ export function buildPremiumPrompt(styleId: StyleId, index: number = 0): string 
   const style = [block.subject, block.environment, block.mood].join(", ");
 
   return [
+    PHOTO_REALISM_ANCHOR + `${block.environment} environment.`,
     IDENTITY_LOCK_MODULE,
     `${framing}, ${style}.`,
     TEXTURE_INJECTION_MODULE,
