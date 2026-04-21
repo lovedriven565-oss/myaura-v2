@@ -23,24 +23,18 @@ export interface DebugPromptParts {
   index: number;
 }
 
-// ─── V10 "Likeness Lock" Architecture ────────────────────────────────────────
+// ─── V11 "Tag Cascade" Architecture ────────────────────────────────────────
 //
 // Design philosophy:
-//   Identity is NON-NEGOTIABLE. Both tiers inherit the same forensic likeness
-//   preservation protocol, age-lock anchors, and anti-plasticity clauses.
+//   Short comma-separated tags force the model into "photography" mode instead
+//   of "CGI description" mode. No numbered lists, no all-caps mandates, no
+//   long sentences. Just camera-first optical anchors followed by likeness tags.
 //
-//   FREE tier  → Clean editorial portrait with mandatory realism tokens.
-//                The smaller model (gemini-3.1-flash-image-preview) receives
-//                enough optical and skin-fidelity anchors to avoid the
-//                infamous "AI wax face" without overwhelming its context.
+//   FREE tier  → Clean tag cascade on Kodak-style film stock.
+//                Enough skin and asymmetry tags to avoid plastic faces.
 //
-//   PREMIUM    → Full optical-physics payload + surgical identity enforcement.
-//                gemini-3-pro-image-preview reasons through lens geometry,
-//                micro-skin texture, catchlight asymmetry, and anatomical
-//                coherence under strict "do not beautify" constraints.
-//
-// Value gap lives in optical depth, NOT in identity safety. A Free user gets a
-// believable human; a Premium user gets a believable human shot on a $4k lens.
+//   PREMIUM    → Full optical payload: sensor, lens, film grain, catchlights.
+//                gemini-3-pro-image-preview reasons through the tag cloud.
 
 export const CORE_STYLES: readonly StyleId[] = Object.freeze([
   "business",
@@ -66,126 +60,120 @@ interface StyleBlock {
   mood: string;
 }
 
+// ── Style tag blocks: short comma-separated phrases only ────────────────────
 const STYLE_BLOCKS: Record<StyleId, StyleBlock> = {
   business: {
-    subject: "dressed in a sharply tailored dark suit with a crisp shirt, composed professional posture",
-    environment: "modern glass-walled corporate office with soft diffused north-window light, subtle architectural bokeh",
+    subject: "sharply tailored dark suit, crisp white shirt, composed professional posture",
+    environment: "modern glass-walled corporate office, soft diffused north-window light, subtle architectural bokeh",
     mood: "confident, authoritative, quietly powerful",
   },
   lifestyle: {
-    subject: "wearing neutral-tone cashmere knitwear or softly tailored casuals, natural relaxed posture",
-    environment: "warm golden-hour outdoor setting with gentle lens flare and creamy background blur",
+    subject: "neutral-tone cashmere knitwear, softly tailored casuals, natural relaxed posture",
+    environment: "warm golden-hour outdoor setting, gentle lens flare, creamy background blur",
     mood: "approachable, candid, effortlessly elegant",
   },
   cinematic: {
-    subject: "wearing dark structured clothing, contemplative gaze slightly off-camera",
-    environment: "low-key studio with practical tungsten backlights and atmospheric haze",
-    mood: "moody, intense, film-noir restraint with teal-and-orange grading",
+    subject: "dark structured clothing, contemplative gaze slightly off-camera",
+    environment: "low-key studio, practical tungsten backlights, atmospheric haze",
+    mood: "moody, intense, film-noir restraint, teal-and-orange grading",
   },
   editorial: {
-    subject: "wearing a bold avant-garde silhouette, striking editorial pose",
-    environment: "seamless minimal paper-backdrop studio, overhead beauty dish with fill reflector",
+    subject: "bold avant-garde silhouette, striking editorial pose",
+    environment: "seamless minimal paper-backdrop studio, overhead beauty dish, fill reflector",
     mood: "high-contrast, magazine-cover confidence, gallery-grade composition",
   },
   luxury: {
-    subject: "wearing bespoke silk or fine merino layering with subtle gold accents",
-    environment: "grand private library or hotel suite with warm ambient reading lamps, antique texture",
+    subject: "bespoke silk, fine merino layering, subtle gold accents",
+    environment: "grand private library or hotel suite, warm ambient reading lamps, antique texture",
     mood: "quiet wealth, understated sophistication, heritage elegance",
   },
   aura: {
-    subject: "wearing flowing translucent fabric that catches the light",
-    environment: "abstract backdrop with soft volumetric light rays and iridescent color shifts",
+    subject: "flowing translucent fabric catching the light",
+    environment: "abstract backdrop, soft volumetric light rays, iridescent color shifts",
     mood: "ethereal, dreamlike, fine-art dream-pop",
   },
   // ── Premium-exclusive styles ──────────────────────────────────────────
   cyberpunk: {
-    subject: "wearing a sleek techwear jacket with subtle neon piping, sharp silhouette",
-    environment: "neon-drenched night cityscape with rain reflections, atmospheric haze, purple-and-cyan signage bokeh",
+    subject: "sleek techwear jacket, subtle neon piping, sharp silhouette",
+    environment: "neon-drenched night cityscape, rain reflections, atmospheric haze, purple-and-cyan signage bokeh",
     mood: "futuristic, kinetic, blade-runner atmosphere",
   },
   corporate: {
-    subject: "in an impeccable charcoal suit with conservative tie, hands composed, boardroom posture",
+    subject: "impeccable charcoal suit, conservative tie, hands composed, boardroom posture",
     environment: "Fortune-500 executive suite, floor-to-ceiling window skyline, brushed-metal desk details",
     mood: "CEO-tier authority, institutional trust, LinkedIn-executive polish",
   },
   ethereal: {
-    subject: "wearing diaphanous pale fabric, serene expression, gentle chiaroscuro on the face",
-    environment: "soft misted studio with morning god-rays cutting through dust particles, pastel gradient backdrop",
+    subject: "diaphanous pale fabric, serene expression, gentle chiaroscuro on the face",
+    environment: "soft misted studio, morning god-rays through dust particles, pastel gradient backdrop",
     mood: "celestial, painterly, Renaissance fresco sensibility",
   },
 };
 
 const VARIETY_FRAMINGS = [
-  "Perfectly centered frontal portrait, raw unedited",
-  "Subtle 3/4 angle portrait, raw unedited",
-  "Medium close-up portrait, raw unedited",
-  "Head-and-shoulders portrait, raw unedited",
-  "Environmental portrait with background depth, raw unedited",
-  "Relaxed posture three-quarter portrait, raw unedited",
+  "centered frontal portrait",
+  "subtle 3/4 angle portrait",
+  "medium close-up portrait",
+  "head-and-shoulders portrait",
+  "environmental portrait with background depth",
+  "relaxed posture three-quarter portrait",
 ];
 
-// ── Tier-differentiated aesthetic suffixes ───────────────────────────────────
-// FREE_SUFFIX is the polished floor — clean, editorial, safe for any model.
-// PREMIUM_SUFFIX is the optical-physics payload — sensor, lens, grade, grain,
-// catchlights, anatomical anchors. This is what the heavier model rewards.
+// ── Camera-first optical anchors ────────────────────────────────────────────
 const FREE_AESTHETIC_SUFFIX =
-  "Raw photo, unedited. Shot on 85mm portrait lens, shallow depth of field with natural bokeh. " +
-  "Visible skin pores, natural micro-texture, subtle subsurface scattering on ears and nose. " +
-  "Accurate daylight color science, no digital smoothing, no beauty filter, no AI gloss. " +
-  "Preserve every facial asymmetry, freckle, and natural imperfection exactly as in the reference.";
+  "authentic candid photograph, shot on Kodak Portra 400, 85mm f/1.4 lens, ultra-detailed, " +
+  "raw unedited photo, shallow depth of field, natural creamy bokeh, " +
+  "visible skin pores, natural micro-texture, subtle subsurface scattering on ears and nose, " +
+  "accurate daylight color science, no digital smoothing, no beauty filter, no AI gloss, " +
+  "preserve every facial asymmetry, freckle, natural imperfection exactly as in the reference";
 
-const PREMIUM_AESTHETIC_SUFFIX = [
-  // Optical physics
-  "Raw unedited photo. Shot on Sony A7 IV full-frame sensor, Sony GM 85mm f/1.4 prime lens at f/2.0, shallow depth of field with creamy natural bokeh roll-off",
-  // Color science
-  "Neutral daylight color science, accurate skin tone reproduction without warmth injection, subtle 35mm organic film grain",
-  // Skin realism — surgical
-  "Hyper-realistic skin micro-texture: visible pores, fine vellus hair, natural sebum sheen on T-zone, subsurface scattering on ears/nose/cheeks, absolutely no plastic smoothing or pore erasure",
-  // Eye / anatomy anchors — likeness-critical
-  "Asymmetric catchlights matching ambient source, preserved iris pattern detail and limbal ring thickness, correct sclera vascularity, anatomically correct hand articulation and knuckle definition",
-  // Anti-beauty mandate
-  "NO digital retouching of any kind: no frequency separation, no dodge/burn, no skin smoothing, no teeth whitening, no eye brightening, no jawline sharpening, no cheekbone enhancement, no lip plumping",
-  // Editorial frame
-  "Vogue-tier composition with commercial-grade RAW fidelity, gallery-print micro-contrast",
-].join(". ") + ";";
+const PREMIUM_AESTHETIC_SUFFIX =
+  "authentic candid photograph, shot on Sony A7 IV full-frame sensor, Sony GM 85mm f/1.4 prime lens at f/2.0, ultra-detailed, " +
+  "raw unedited photo, shallow depth of field with creamy natural bokeh roll-off, " +
+  "neutral daylight color science, accurate skin tone reproduction without warmth injection, subtle 35mm organic film grain, " +
+  "hyper-realistic skin micro-texture, visible pores, fine vellus hair, natural sebum sheen on T-zone, subsurface scattering on ears nose cheeks, no plastic smoothing, no pore erasure, " +
+  "asymmetric catchlights matching ambient source, preserved iris pattern detail, limbal ring thickness, correct sclera vascularity, anatomically correct hand articulation, knuckle definition, " +
+  "no digital retouching, no frequency separation, no dodge and burn, no skin smoothing, no teeth whitening, no eye brightening, no jawline sharpening, no cheekbone enhancement, no lip plumping, " +
+  "Vogue-tier composition, commercial-grade RAW fidelity, gallery-print micro-contrast";
 
-// ── Negative prompts: tier-aware strictness ──────────────────────────────────
-const BASE_NEGATIVE =
-  "different person, altered facial features, changed eye color, distorted anatomy, extra fingers, malformed hands, text artifacts, watermarks, symmetry correction, skin smoothing, pore erasure, baby face filter, age regression, age advancement, plastic skin, wax complexion, CGI sheen";
+// ── Simplified negative prompt (shared, no tier split) ─────────────────────
+const NEGATIVE_PROMPT =
+  "3D render, CGI, plastic, beauty filter, smooth skin, cartoon, different person, altered facial features, " +
+  "changed eye color, distorted anatomy, extra fingers, malformed hands, text artifacts, watermarks, " +
+  "symmetry correction, skin smoothing, pore erasure, baby face filter, age regression, age advancement, " +
+  "wax complexion, synthetic hair, over-retouched porcelain, uncanny AI gloss, digital makeup, teeth whitening, " +
+  "eye enlargement, lip plumping, cheekbone enhancement, jawline sharpening, rubber-band jawline, smeared irises, " +
+  "blurred pores, porcelain doll effect, Instagram filter, Snapchat filter, frequency separation, dodge and burn";
 
-const PREMIUM_NEGATIVE_ANCHORS =
-  ", over-retouched porcelain, uncanny AI gloss, digital makeup, beauty filter, teeth whitening, eye enlargement, lip plumping, cheekbone enhancement, jawline sharpening, rubber-band jawline, smeared irises, cartoon proportions, 3D render tells, synthetic hair, blurred pores, porcelain doll effect, Instagram filter, Snapchat filter, frequency separation, dodge and burn";
-
-// ── Identity core (shared) ───────────────────────────────────────────────────
-const IDENTITY_CORE =
-  "A raw unretouched photorealistic portrait of the EXACT same individual shown in every reference photo. " +
-  "IDENTITY PRESERVATION PROTOCOL — MANDATORY: " +
-  "(1) Reproduce the identical facial bone structure, eye socket shape, brow ridge contour, nose bridge width and tip geometry, lip fullness and Cupid's bow, jawline angle, chin projection, and ear shape. " +
-  "(2) Preserve natural asymmetries: do NOT correct eye size differences, eyebrow height variance, nose deviation, or jaw asymmetry. " +
-  "(3) Skin fidelity: reproduce exact pore density, natural sebum sheen, stubble pattern, acne, freckles, moles, scar tissue, under-eye hollows, and nasolabial fold depth. " +
-  "(4) Eye fidelity: preserve exact iris color, pattern, and limbal ring thickness; maintain correct sclera vascularity and catchlight geometry. " +
-  "(5) Forbidden transforms: NO symmetry correction, NO skin smoothing, NO pore erasure, NO eye enlargement, NO jawline sharpening, NO lip plumping, NO cheekbone enhancement, NO digital makeup, NO teeth whitening, NO wrinkle removal. " +
-  "The subject must be immediately recognizable as the same person by a third party who knows them.";
+// ── Identity core: likeness tags only ───────────────────────────────────────
+const LIKENESS_TAGS =
+  "exact facial likeness to reference, raw unedited skin texture, visible pores, natural facial asymmetry, " +
+  "identical bone structure, preserved eye socket shape, brow ridge contour, nose bridge width and tip geometry, " +
+  "lip fullness and Cupid's bow, jawline angle, chin projection, ear shape, " +
+  "natural eye size differences, eyebrow height variance, nose deviation, jaw asymmetry, " +
+  "exact pore density, natural sebum sheen, stubble pattern, acne, freckles, moles, scar tissue, " +
+  "under-eye hollows, nasolabial fold depth, exact iris color and pattern, limbal ring thickness, " +
+  "correct sclera vascularity, asymmetric catchlights matching ambient source";
 
 function describeDemographics(gender: Gender, ageTier: AgeTier): string {
-  const ageLock =
+  const ageTags =
     ageTier === "young"
-      ? "AGE LOCK 24–26: subject must appear exactly mid-twenties. Preserve youthful skin texture but DO NOT infantilize. Retain adult facial proportions, cheekbone height, and jaw width. Forbidden: baby-face filter, cheek puffing, oversized eyes, reduced nose bridge, lip plumping."
+      ? "mid-twenties age lock, youthful skin texture, adult facial proportions, cheekbone height, jaw width, no baby-face filter, no cheek puffing, no oversized eyes, no reduced nose bridge, no lip plumping"
       : ageTier === "mature"
-      ? "AGE LOCK 35–38: subject must appear exactly mid-thirties. Preserve early expression lines, natural forehead texture, slight crow's feet, and mature skin density. Forbidden: youth filter, wrinkle erasure, skin tightening, glow enhancement, eye bag removal."
-      : "AGE LOCK 48–52: subject must appear exactly late-forties. Preserve distinguished graying temples, natural forehead lines, crow's feet, nasolabial folds, slight jowl definition, and mature skin laxity. Forbidden: age regression, gray hair removal, wrinkle flattening, skin lifting, brightness injection.";
+      ? "mid-thirties age lock, early expression lines, natural forehead texture, slight crow's feet, mature skin density, no youth filter, no wrinkle erasure, no skin tightening, no glow enhancement, no eye bag removal"
+      : "late-forties age lock, distinguished graying temples, natural forehead lines, crow's feet, nasolabial folds, slight jowl definition, mature skin laxity, no age regression, no gray hair removal, no wrinkle flattening, no skin lifting, no brightness injection";
 
-  const genderHint =
+  const genderTags =
     gender === "male"
-      ? "Masculine presentation: preserve Adam's apple visibility, brow bossing, facial hair density, and masculine skin texture without exaggeration."
+      ? "masculine presentation, Adam's apple visibility, brow bossing, facial hair density, masculine skin texture"
       : gender === "female"
-      ? "Feminine presentation: preserve lip vermillion definition, lash density, and feminine bone structure without artificial enhancement."
-      : "Gender presentation faithfully mirrored from references without stereotyping or exaggeration.";
+      ? "feminine presentation, lip vermillion definition, lash density, feminine bone structure"
+      : "gender presentation faithfully mirrored from references, no stereotyping, no exaggeration";
 
-  return `Demographics: ${ageLock} ${genderHint}`;
+  return `${ageTags}, ${genderTags}`;
 }
 
-function buildV10Prompt(
+function buildV11Prompt(
   gender: Gender,
   styleId: StyleId,
   ageTier: AgeTier,
@@ -196,21 +184,21 @@ function buildV10Prompt(
   const framing = VARIETY_FRAMINGS[index % VARIETY_FRAMINGS.length];
   const demographics = describeDemographics(gender, ageTier);
 
-  // Composition layer — shared across tiers, identity is non-negotiable
-  const composition =
-    `${IDENTITY_CORE} ${demographics} Framing: ${framing}. ` +
-    `Subject: ${styleBlock.subject}. ` +
-    `Environment: ${styleBlock.environment}. ` +
-    `Mood: ${styleBlock.mood}. `;
-
-  // Aesthetic layer — differentiates Free vs Premium in optical depth only
-  const aesthetic = mode === "premium" ? PREMIUM_AESTHETIC_SUFFIX : FREE_AESTHETIC_SUFFIX;
-
-  return composition + aesthetic;
+  // Camera-first tag cascade: camera, likeness, demographics, framing, subject, environment, mood, optical suffix
+  return [
+    mode === "premium" ? PREMIUM_AESTHETIC_SUFFIX : FREE_AESTHETIC_SUFFIX,
+    LIKENESS_TAGS,
+    demographics,
+    framing,
+    styleBlock.subject,
+    styleBlock.environment,
+    styleBlock.mood,
+  ].join(", ");
 }
 
-function buildNegativePrompt(mode: PromptType): string {
-  return mode === "premium" ? BASE_NEGATIVE + PREMIUM_NEGATIVE_ANCHORS : BASE_NEGATIVE;
+function buildNegativePrompt(_mode: PromptType): string {
+  // Simplified: one clean negative prompt for both tiers
+  return NEGATIVE_PROMPT;
 }
 
 export function buildPromptProfile(
@@ -220,11 +208,11 @@ export function buildPromptProfile(
   ageTier: AgeTier = "young",
   gender: Gender = "unset",
 ): { positivePrompt: string; negativePrompt: string; debugPromptParts: DebugPromptParts } {
-  const positivePrompt = buildV10Prompt(gender, styleId, ageTier, mode, index);
+  const positivePrompt = buildV11Prompt(gender, styleId, ageTier, mode, index);
   const negativePrompt = buildNegativePrompt(mode);
 
   const debugPromptParts: DebugPromptParts = {
-    version: "V10-LikenessLock",
+    version: "V11-TagCascade",
     styleId,
     mode,
     gender,
@@ -233,7 +221,7 @@ export function buildPromptProfile(
   };
 
   console.log(
-    `[PROMPT V10-LikenessLock] style=${styleId} mode=${mode} gender=${gender} age=${ageTier} idx=${index}`,
+    `[PROMPT V11-TagCascade] style=${styleId} mode=${mode} gender=${gender} age=${ageTier} idx=${index}`,
   );
   return { positivePrompt, negativePrompt, debugPromptParts };
 }
