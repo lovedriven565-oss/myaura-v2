@@ -17,7 +17,23 @@ export interface IGenerationProvider {
 //   Tier differentiation lives in OUTPUT VOLUME, EXCLUSIVE STYLES, REFERENCE
 //   DEPTH, and TEMPERATURE — NOT in model choice.
 const UNIFIED_MODEL = "gemini-3.1-flash-image-preview";
-const IMAGEN_3_MODEL = "imagen-3.0-generate-001";
+const IMAGEN_3_GENERATE_MODEL = "imagen-3.0-generate-001";
+// v5.0: Imagen 3 Capability model is REQUIRED for Subject Customization.
+// The generate model does NOT support referenceImages with subjectImageConfig.
+const IMAGEN_3_CAPABILITY_MODEL = "imagen-3.0-capability-001";
+
+// ─── v5.0 Instant Tuning / Subject Customization Feature Flags ──────────────
+//   Vertex AI "Instant Tuning" for Imagen 3 is an experimental pipeline.
+//   When enabled, Premium tier attempts to create a lightweight subject adapter
+//   via a Vertex AI CustomJob, then generates through the tuned endpoint.
+//   If tuning fails or is disabled, we fall back to inference-time Subject
+//   Customization on the capability model (the Google-documented path).
+const VERTEX_AI_TUNING_ENABLED = process.env.VERTEX_AI_TUNING_ENABLED === "true";
+const VERTEX_AI_TUNING_CONTAINER_IMAGE = process.env.VERTEX_AI_TUNING_CONTAINER_IMAGE || "";
+const VERTEX_AI_TUNING_ARGS_JSON = process.env.VERTEX_AI_TUNING_ARGS_JSON || "[]";
+const VERTEX_AI_TUNING_MACHINE_TYPE = process.env.VERTEX_AI_TUNING_MACHINE_TYPE || "n1-standard-4";
+const VERTEX_AI_TUNING_MAX_WAIT_MS = parseInt(process.env.VERTEX_AI_TUNING_MAX_WAIT_MS || "900000", 10); // 15 min
+const VERTEX_AI_TUNING_POLL_INTERVAL_MS = parseInt(process.env.VERTEX_AI_TUNING_POLL_INTERVAL_MS || "15000", 10); // 15s
 
 // Retry configuration for resilience against 429 rate limits
 const MAX_RETRIES = 2;
@@ -29,8 +45,12 @@ const MAX_DELAY_MS = 60000;  // cap at 60s
 const MODEL_CALL_TIMEOUT_MS: Record<string, number> = {
   ["gemini-2.5-flash-image"]:          90_000,
   ["gemini-3.1-flash-image-preview"]:  90_000,
+  [IMAGEN_3_CAPABILITY_MODEL]:          120_000, // Subject Customization is heavier
 };
 const DEFAULT_CALL_TIMEOUT_MS = 90_000;
+
+// v5.0: Tuned-model inference may have cold-start latency.
+const TUNED_MODEL_CALL_TIMEOUT_MS = parseInt(process.env.TUNED_MODEL_TIMEOUT_MS || "180000", 10);
 
 function stringifyErrorDetails(value: unknown): string {
   try {
@@ -506,13 +526,17 @@ export class VertexAIProvider implements IGenerationProvider {
   }
 
   /**
-   * v4.1 IMAGEN-3 PIVOT: For Premium tier, attempt Imagen 3 via REST API first.
-   * Imagen 3 has superior subject-fidelity (haircut preservation, jawline
-   * adherence) but requires a different endpoint (predict) and body format.
-   * If IAM/404/transport fails, we immediately fall back to the unified
-   * flash model so the batch never hard-fails.
+   * v5.0 IMAGEN-3 SUBJECT CUSTOMIZATION: Proper inference-time subject preservation
+   * using imagen-3.0-capability-001 with subjectImageConfig + subjectDescription.
+   *
+   * Key differences from v4.1:
+   *   - Uses imagen-3.0-capability-001 (the model that supports Subject Customization)
+   *   - subjectImageConfig.subjectDescription anchors the model to the reference face
+   *   - Prompt includes [1] token so the model binds the reference image to the person
+   *   - Optional face-mesh CONTROL reference (same image) to lock facial geometry
+   *   - Falls back to flash model on any error.
    */
-  private async _callImagen3(
+  private async _callImagen3SubjectCustomization(
     slot: KeySlot,
     prompt: string,
     originalImageBase64: string,
@@ -529,10 +553,12 @@ export class VertexAIProvider implements IGenerationProvider {
     const client = await auth.getClient();
     const accessToken = await client.getAccessToken();
 
-    // Imagen 3 predict endpoint requires a regional location, not "global"
+    // Subject Customization requires a regional endpoint (us-central1 or europe-west4)
     const location = VERTEX_LOCATION === 'global' ? 'us-central1' : VERTEX_LOCATION;
-    const url = `https://${location}-aiplatform.googleapis.com/v1/projects/${slot.projectId || VERTEX_ADC_PROJECT}/locations/${location}/publishers/google/models/${IMAGEN_3_MODEL}:predict`;
+    const url = `https://${location}-aiplatform.googleapis.com/v1/projects/${slot.projectId || VERTEX_ADC_PROJECT}/locations/${location}/publishers/google/models/${IMAGEN_3_CAPABILITY_MODEL}:predict`;
 
+    // ── Reference images ──────────────────────────────────────────────────
+    // Primary subject reference (referenceId: 1) — the face we want to preserve
     const referenceImages: any[] = [{
       referenceType: "REFERENCE_TYPE_SUBJECT",
       referenceId: 1,
@@ -540,19 +566,41 @@ export class VertexAIProvider implements IGenerationProvider {
         bytesBase64Encoded: originalImageBase64,
         mimeType,
       },
-      subjectType: "SUBJECT_TYPE_PERSON",
+      subjectImageConfig: {
+        subjectDescription: "professional headshot portrait with exact haircut geometry, natural receding hairline, un-retouched skin texture, and original jawline",
+        subjectType: "SUBJECT_TYPE_PERSON",
+      },
     }];
 
+    // Face-mesh control reference (referenceId: 2) — same image, used to lock facial geometry.
+    // This prevents the model from altering jawline, chin, or face width.
+    referenceImages.push({
+      referenceType: "REFERENCE_TYPE_CONTROL",
+      referenceId: 2,
+      referenceImage: {
+        bytesBase64Encoded: originalImageBase64,
+        mimeType,
+      },
+      controlImageConfig: {
+        controlType: "CONTROL_TYPE_FACE_MESH",
+        enableControlImageComputation: true,
+      },
+    });
+
+    // Additional reference images as extra subject anchors (referenceId: 3+)
     if (additionalImages && additionalImages.length > 0) {
       additionalImages.forEach((img, idx) => {
         referenceImages.push({
           referenceType: "REFERENCE_TYPE_SUBJECT",
-          referenceId: idx + 2,
+          referenceId: idx + 3,
           referenceImage: {
             bytesBase64Encoded: img,
             mimeType,
           },
-          subjectType: "SUBJECT_TYPE_PERSON",
+          subjectImageConfig: {
+            subjectDescription: "additional angle of the same person, same haircut and facial features",
+            subjectType: "SUBJECT_TYPE_PERSON",
+          },
         });
       });
     }
@@ -579,47 +627,321 @@ export class VertexAIProvider implements IGenerationProvider {
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`Imagen 3 predict failed: ${response.status} ${errorText}`);
+      throw new Error(`Imagen 3 Subject Customization predict failed: ${response.status} ${errorText}`);
     }
 
     const data = await response.json() as any;
     const predictions = data.predictions || [];
     if (predictions.length === 0) {
-      throw new Error('Imagen 3 returned no predictions');
+      throw new Error('Imagen 3 Subject Customization returned no predictions');
     }
 
     const imageData = predictions[0]?.bytesBase64Encoded;
     if (!imageData) {
-      throw new Error('Imagen 3 prediction missing image data');
+      throw new Error('Imagen 3 Subject Customization prediction missing image data');
     }
     return imageData;
   }
 
-  private async _generate(slot: KeySlot, originalImageBase64: string, mimeType: string, prompt: string, mode: 'preview' | 'premium', additionalImages?: string[], apiVersion?: string): Promise<string> {
+  // ═════════════════════════════════════════════════════════════════════════════
+  // ─── EXPERIMENTAL: Vertex AI Instant Tuning Pipeline (v5.0) ─────────────────
+  // ═════════════════════════════════════════════════════════════════════════════
+  //
+  // NOTE: This pipeline attempts to create a Vertex AI CustomJob that runs an
+  // "Instant Tuning" container for Imagen 3, producing a tuned model/adapter.
+  // It is EXPERIMENTAL and gated by VERTEX_AI_TUNING_ENABLED.
+  //
+  // Required environment variables (when enabled):
+  //   VERTEX_AI_TUNING_CONTAINER_IMAGE — GCR image URI for the tuning container
+  //   VERTEX_AI_TUNING_ARGS_JSON       — JSON array of container arguments
+  //
+  // If tuning fails at any step, we immediately fall back to inference-time
+  // Subject Customization (imagen-3.0-capability-001) which is the Google-
+  // documented path and requires no training job.
+  // ═════════════════════════════════════════════════════════════════════════════
+
+  private async _createInstantTuningJob(
+    slot: KeySlot,
+    _originalImageBase64: string,
+    _mimeType: string,
+    _additionalImages?: string[],
+  ): Promise<string> {
+    if (!VERTEX_AI_TUNING_CONTAINER_IMAGE) {
+      throw new Error('VERTEX_AI_TUNING_CONTAINER_IMAGE is not configured');
+    }
+
+    const { GoogleAuth } = await import('google-auth-library');
+    const auth = new GoogleAuth({
+      keyFile: slot.isAdc ? undefined : slot.keyPath,
+      scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+      projectId: slot.projectId || VERTEX_ADC_PROJECT,
+    });
+    const client = await auth.getClient();
+    const accessToken = await client.getAccessToken();
+
+    const location = VERTEX_LOCATION === 'global' ? 'us-central1' : VERTEX_LOCATION;
+    const url = `https://${location}-aiplatform.googleapis.com/v1/projects/${slot.projectId || VERTEX_ADC_PROJECT}/locations/${location}/customJobs`;
+
+    const displayName = `myaura-instant-tuning-${Date.now()}`;
+    let containerArgs: string[] = [];
+    try {
+      containerArgs = JSON.parse(VERTEX_AI_TUNING_ARGS_JSON);
+    } catch {
+      console.warn('[v5.0-Tuning] VERTEX_AI_TUNING_ARGS_JSON is not valid JSON, using empty args');
+    }
+
+    const body = {
+      displayName,
+      jobSpec: {
+        workerPoolSpecs: [{
+          machineSpec: { machineType: VERTEX_AI_TUNING_MACHINE_TYPE },
+          containerSpec: {
+            imageUri: VERTEX_AI_TUNING_CONTAINER_IMAGE,
+            args: containerArgs,
+          },
+        }],
+      },
+    };
+
+    const fetch = (await import('node-fetch')).default || globalThis.fetch;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Tuning job creation failed: ${response.status} ${errorText}`);
+    }
+
+    const data = await response.json() as any;
+    const jobName = data.name; // e.g. projects/.../locations/.../customJobs/123
+    console.log(`[v5.0-Tuning] Created CustomJob: ${jobName}`);
+    return jobName;
+  }
+
+  private async _pollTuningJob(
+    slot: KeySlot,
+    jobName: string,
+  ): Promise<{ modelName?: string; endpointName?: string } | null> {
+    const { GoogleAuth } = await import('google-auth-library');
+    const auth = new GoogleAuth({
+      keyFile: slot.isAdc ? undefined : slot.keyPath,
+      scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+      projectId: slot.projectId || VERTEX_ADC_PROJECT,
+    });
+    const client = await auth.getClient();
+    const accessToken = await client.getAccessToken();
+
+    const url = `https://us-central1-aiplatform.googleapis.com/v1/${jobName}`;
+    const fetch = (await import('node-fetch')).default || globalThis.fetch;
+
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < VERTEX_AI_TUNING_MAX_WAIT_MS) {
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: { 'Authorization': `Bearer ${accessToken}` },
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Tuning job poll failed: ${response.status} ${text}`);
+      }
+
+      const data = await response.json() as any;
+      const state = data.state;
+      console.log(`[v5.0-Tuning] Job ${jobName} state=${state} elapsed=${Math.round((Date.now() - startedAt) / 1000)}s`);
+
+      if (state === 'JOB_STATE_SUCCEEDED') {
+        // Extract model / endpoint from job output if available
+        const modelName = data.jobSpec?.workerPoolSpecs?.[0]?.containerSpec?.args
+          ?.find((a: string) => a.startsWith('--output_model='))
+          ?.replace('--output_model=', '')
+          || data.modelName;
+        return { modelName, endpointName: data.endpointName };
+      }
+
+      if (state === 'JOB_STATE_FAILED' || state === 'JOB_STATE_CANCELLED') {
+        throw new Error(`Tuning job ${jobName} ended with state=${state}`);
+      }
+
+      await new Promise(r => setTimeout(r, VERTEX_AI_TUNING_POLL_INTERVAL_MS));
+    }
+
+    throw new Error(`Tuning job ${jobName} did not complete within ${VERTEX_AI_TUNING_MAX_WAIT_MS}ms`);
+  }
+
+  private async _generateWithTunedModel(
+    slot: KeySlot,
+    prompt: string,
+    endpointName: string,
+  ): Promise<string> {
+    const { GoogleAuth } = await import('google-auth-library');
+    const auth = new GoogleAuth({
+      keyFile: slot.isAdc ? undefined : slot.keyPath,
+      scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+      projectId: slot.projectId || VERTEX_ADC_PROJECT,
+    });
+    const client = await auth.getClient();
+    const accessToken = await client.getAccessToken();
+
+    const url = `https://us-central1-aiplatform.googleapis.com/v1/${endpointName}:predict`;
+    const body = {
+      instances: [{ prompt }],
+      parameters: { sampleCount: 1, aspectRatio: "9:16" },
+    };
+
+    const fetch = (await import('node-fetch')).default || globalThis.fetch;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), TUNED_MODEL_CALL_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Tuned model predict failed: ${response.status} ${errorText}`);
+      }
+
+      const data = await response.json() as any;
+      const predictions = data.predictions || [];
+      if (predictions.length === 0) {
+        throw new Error('Tuned model returned no predictions');
+      }
+      return predictions[0]?.bytesBase64Encoded;
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      throw err;
+    }
+  }
+
+  private async _cleanupTunedModel(
+    slot: KeySlot,
+    modelName?: string,
+    endpointName?: string,
+  ): Promise<void> {
+    const { GoogleAuth } = await import('google-auth-library');
+    const auth = new GoogleAuth({
+      keyFile: slot.isAdc ? undefined : slot.keyPath,
+      scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+      projectId: slot.projectId || VERTEX_ADC_PROJECT,
+    });
+    const client = await auth.getClient();
+    const accessToken = await client.getAccessToken();
+    const fetch = (await import('node-fetch')).default || globalThis.fetch;
+
+    if (endpointName) {
+      try {
+        await fetch(`https://us-central1-aiplatform.googleapis.com/v1/${endpointName}`, {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${accessToken}` },
+        });
+        console.log(`[v5.0-Tuning] Cleaned up endpoint: ${endpointName}`);
+      } catch (e: any) {
+        console.warn(`[v5.0-Tuning] Endpoint cleanup failed: ${e.message}`);
+      }
+    }
+    if (modelName) {
+      try {
+        await fetch(`https://us-central1-aiplatform.googleapis.com/v1/${modelName}`, {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${accessToken}` },
+        });
+        console.log(`[v5.0-Tuning] Cleaned up model: ${modelName}`);
+      } catch (e: any) {
+        console.warn(`[v5.0-Tuning] Model cleanup failed: ${e.message}`);
+      }
+    }
+  }
+
+  /**
+   * v5.0 PREMIUM PIPELINE:
+   *   1. EXPERIMENTAL: If VERTEX_AI_TUNING_ENABLED, attempt Instant Tuning
+   *      (CustomJob → poll → generate with tuned endpoint → cleanup).
+   *   2. PRIMARY: Imagen 3 Subject Customization (imagen-3.0-capability-001)
+   *      with subjectImageConfig + face-mesh CONTROL reference.
+   *   3. FALLBACK: Unified flash model (gemini-3.1-flash-image-preview).
+   *
+   * Free tier skips all of the above and goes straight to flash.
+   */
+  private async _generate(
+    slot: KeySlot,
+    originalImageBase64: string,
+    mimeType: string,
+    prompt: string,
+    mode: 'preview' | 'premium',
+    additionalImages?: string[],
+    apiVersion?: string,
+  ): Promise<string> {
     const tier = mode === 'premium' ? 'PREMIUM' : 'FREE';
 
-    // ─── Premium: attempt Imagen 3 first (superior subject fidelity) ─────────
+    // ─── Premium: attempt experimental tuning pipeline first ─────────────────
+    if (mode === 'premium' && VERTEX_AI_TUNING_ENABLED) {
+      console.log(`[v5.0-TUNING] [Tier: PREMIUM] Attempting Instant Tuning pipeline | key ...${slot.keyHint}`);
+      let tuningJobName: string | undefined;
+      let tunedModelName: string | undefined;
+      let tunedEndpointName: string | undefined;
+
+      try {
+        tuningJobName = await this._createInstantTuningJob(slot, originalImageBase64, mimeType, additionalImages);
+        const tuned = await this._pollTuningJob(slot, tuningJobName);
+        if (!tuned?.endpointName) {
+          throw new Error('Tuning completed but no endpoint was produced');
+        }
+        tunedModelName = tuned.modelName;
+        tunedEndpointName = tuned.endpointName;
+
+        console.log(`[v5.0-TUNING] Tuning complete. endpoint=${tunedEndpointName} model=${tunedModelName}`);
+        const result = await withNetworkRetry(
+          () => this._generateWithTunedModel(slot, prompt, tunedEndpointName!),
+          `TunedModel@${tunedEndpointName}`,
+        );
+        console.log(`[v5.0-TUNING] SUCCESS → image returned`);
+        return result;
+      } catch (tuningErr: any) {
+        console.warn(`[v5.0-TUNING] Tuning pipeline failed: ${tuningErr.message}. Falling back to Subject Customization.`);
+      } finally {
+        if (tuningJobName) {
+          this._cleanupTunedModel(slot, tunedModelName, tunedEndpointName).catch(() => {});
+        }
+      }
+    }
+
+    // ─── Premium: Imagen 3 Subject Customization (primary path) ──────────────
     if (mode === 'premium') {
-      console.log(`[v4.1-IMAGEN-3] [Tier: PREMIUM] Attempting ${IMAGEN_3_MODEL} | key ...${slot.keyHint}`);
+      console.log(`[v5.0-IMAGEN3-SUBJ] [Tier: PREMIUM] Attempting ${IMAGEN_3_CAPABILITY_MODEL} | key ...${slot.keyHint}`);
       try {
         const result = await withNetworkRetry(
-          () => this._callImagen3(slot, prompt, originalImageBase64, mimeType, additionalImages),
-          `Imagen3@${VERTEX_LOCATION}`,
+          () => this._callImagen3SubjectCustomization(slot, prompt, originalImageBase64, mimeType, additionalImages),
+          `Imagen3Subject@${VERTEX_LOCATION}`,
         );
-        console.log(`[v4.1-IMAGEN-3] SUCCESS → image returned`);
+        console.log(`[v5.0-IMAGEN3-SUBJ] SUCCESS → image returned`);
         return result;
       } catch (imagenErr: any) {
         const imagenMsg = imagenErr?.message || "";
         const imagenCls = classifyError(imagenErr, imagenMsg, imagenErr?.details || [], [imagenMsg, stringifyErrorDetails(imagenErr)].join(" "));
 
-        // IAM / 404 / model not enabled → fall through to flash, do NOT throw
         if (imagenCls.isModelPermission || imagenCls.isNotFound || imagenCls.isBilling) {
-          console.warn(`[v4.1-IMAGEN-3] ${IMAGEN_3_MODEL} unavailable (${imagenMsg.slice(0, 160)}). Falling back to flash.`);
+          console.warn(`[v5.0-IMAGEN3-SUBJ] ${IMAGEN_3_CAPABILITY_MODEL} unavailable (${imagenMsg.slice(0, 160)}). Falling back to flash.`);
         } else if (imagenCls.is429) {
           markKeyCooldown(slot);
-          console.warn(`[v4.1-IMAGEN-3] 429 on ${IMAGEN_3_MODEL}. Falling back to flash.`);
+          console.warn(`[v5.0-IMAGEN3-SUBJ] 429 on ${IMAGEN_3_CAPABILITY_MODEL}. Falling back to flash.`);
         } else {
-          console.warn(`[v4.1-IMAGEN-3] ${IMAGEN_3_MODEL} failed (${imagenMsg.slice(0, 160)}). Falling back to flash.`);
+          console.warn(`[v5.0-IMAGEN3-SUBJ] ${IMAGEN_3_CAPABILITY_MODEL} failed (${imagenMsg.slice(0, 160)}). Falling back to flash.`);
         }
         // Intentional fall-through to flash fallback below
       }
@@ -641,14 +963,14 @@ export class VertexAIProvider implements IGenerationProvider {
     const effectiveApiVersion = 'v1beta1';
     const effectiveLocation = VERTEX_AI_PREVIEW_LOCATION;
 
-    console.log(`[v4.1-FLASH-FALLBACK] [Tier: ${tier}] L1 → ${l1Model} (${effectiveApiVersion}) | region=${effectiveLocation} | key ...${slot.keyHint}`);
+    console.log(`[v5.0-FLASH-FALLBACK] [Tier: ${tier}] L1 → ${l1Model} (${effectiveApiVersion}) | region=${effectiveLocation} | key ...${slot.keyHint}`);
 
     try {
       const result = await withNetworkRetry(
         () => this._callModel(slot, l1Model, contents, mode, effectiveLocation, effectiveApiVersion),
         `L1 ${l1Model}@${effectiveLocation}`,
       );
-      console.log(`[v4.1-FLASH-FALLBACK] L1 SUCCESS | model=${l1Model}@${effectiveLocation}`);
+      console.log(`[v5.0-FLASH-FALLBACK] L1 SUCCESS | model=${l1Model}@${effectiveLocation}`);
       return result;
     } catch (l1Err: any) {
       const l1Msg = l1Err?.message || "";
@@ -657,8 +979,8 @@ export class VertexAIProvider implements IGenerationProvider {
       if (l1Cls.isBilling) markKey24hCooldown(slot, 'L1 billing disabled');
       else if (l1Cls.is429) markKeyCooldown(slot);
 
-      console.error(`[v4.1-FLASH-FALLBACK] L1 ${l1Model} FATAL in ${effectiveLocation} (${l1Msg.slice(0, 200)})`);
-      throw new Error(`[v4.1] Generation failed on ${l1Model}@${effectiveLocation}: ${l1Msg.slice(0, 150)}`);
+      console.error(`[v5.0-FLASH-FALLBACK] L1 ${l1Model} FATAL in ${effectiveLocation} (${l1Msg.slice(0, 200)})`);
+      throw new Error(`[v5.0] Generation failed on ${l1Model}@${effectiveLocation}: ${l1Msg.slice(0, 150)}`);
     }
   }
 }

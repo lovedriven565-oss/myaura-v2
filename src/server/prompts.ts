@@ -191,17 +191,34 @@ const NEGATIVE_PROMPT =
   "digital makeup, teeth whitening, jawline sharpening, chin elongation, asymmetry correction, " +
   "over-optimization, hairline lowering, hair density increase, V-line jaw, masseter reduction";
 
+/**
+ * Build a V13 prompt with optional Imagen 3 subject reference token.
+ *
+ * When subjectRefId is provided (e.g. 1 for Imagen 3 Subject Customization),
+ * the token [1] is appended to the gender tag so the model knows which
+ * reference image to apply the anatomical description to.
+ */
 function buildV13Prompt(
   gender: Gender,
   styleId: StyleId,
   ageTier: AgeTier,
   _mode: PromptType,
   index: number,
+  subjectRefId?: number,
 ): string {
   const styleBlock = STYLE_BLOCKS[styleId] || STYLE_BLOCKS.business;
   const framing = VARIETY_FRAMINGS[index % VARIETY_FRAMINGS.length];
   const anatomicalLock = buildAnatomicalLock(ageTier);
-  const demographics = buildDemographics(gender, ageTier);
+  let demographics = buildDemographics(gender, ageTier);
+
+  // Inject Imagen 3 subject-reference token (e.g. "male [1], natural expression...")
+  // so the model binds the reference image to the described person.
+  if (subjectRefId !== undefined && subjectRefId > 0) {
+    demographics = demographics.replace(
+      /^(male|female|gender-neutral)/,
+      `$1 [${subjectRefId}]`
+    );
+  }
 
   // V13 Reference-First cascade:
   // Medium Override → Anatomical Lock (Hair + Jawline) → Demographics → Framing → Subject → Environment → Mood
@@ -226,12 +243,13 @@ export function buildPromptProfile(
   index: number = 0,
   ageTier: AgeTier = "young",
   gender: Gender = "unset",
+  subjectRefId?: number,
 ): { positivePrompt: string; negativePrompt: string; debugPromptParts: DebugPromptParts } {
-  const positivePrompt = buildV13Prompt(gender, styleId, ageTier, mode, index);
+  const positivePrompt = buildV13Prompt(gender, styleId, ageTier, mode, index, subjectRefId);
   const negativePrompt = buildNegativePrompt(mode);
 
   const debugPromptParts: DebugPromptParts = {
-    version: "V13-Anatomical",
+    version: subjectRefId ? "V13-Anatomical-Imagen3" : "V13-Anatomical",
     styleId,
     mode,
     gender,
@@ -240,7 +258,7 @@ export function buildPromptProfile(
   };
 
   console.log(
-    `[PROMPT V13-Anatomical] style=${styleId} mode=${mode} gender=${gender} age=${ageTier} idx=${index}`,
+    `[PROMPT ${debugPromptParts.version}] style=${styleId} mode=${mode} gender=${gender} age=${ageTier} idx=${index} ref=${subjectRefId ?? "none"}`,
   );
   return { positivePrompt, negativePrompt, debugPromptParts };
 }
@@ -253,6 +271,21 @@ export function buildPrompt(
   gender: Gender = "unset",
 ): { prompt: string; negativePrompt: string } {
   const { positivePrompt, negativePrompt } = buildPromptProfile(styleId, type, index, ageTier, gender);
+  return { prompt: positivePrompt, negativePrompt };
+}
+
+/**
+ * Build a prompt specifically for Imagen 3 Subject Customization.
+ * Injects the [1] subject-reference token so the model binds the
+ * reference image to the described person.
+ */
+export function buildPromptForImagen3(
+  styleId: StyleId,
+  index: number = 0,
+  ageTier: AgeTier = "young",
+  gender: Gender = "unset",
+): { prompt: string; negativePrompt: string } {
+  const { positivePrompt, negativePrompt } = buildPromptProfile(styleId, "premium", index, ageTier, gender, 1);
   return { prompt: positivePrompt, negativePrompt };
 }
 

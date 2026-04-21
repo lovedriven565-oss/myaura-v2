@@ -3,7 +3,7 @@ import { v4 as uuidv4 } from "uuid";
 import { getDb } from "./db.js";
 import { storage } from "./storage.js";
 import { aiProvider } from "./ai.js";
-import { buildPrompt, StyleId, AgeTier, Gender } from "./prompts.js";
+import { buildPrompt, buildPromptForImagen3, StyleId, AgeTier, Gender } from "./prompts.js";
 import { validatePackageInput, buildStyleSchedule, buildStyleScheduleWithCount, runBatched, getGenerationConfig, PACKAGES, generationQueue } from "./packages.js";
 import { deliverTelegramPhoto, deliverTelegramResults, notifyReferralAwarded, sendTelegramStatus } from "./telegram.js";
 import { selectBestReferencePhotos } from "./inputCuration.js";
@@ -1004,7 +1004,9 @@ apiRouter.post("/generate",
           console.warn(`[${id}] Image ${index}: Invalid styleId "${styleId}", falling back to business`);
         }
         console.log(`[${id}] Image ${index}: Generating with style="${validStyleId}", tier="${config.promptTier}"`);
-        const { prompt, negativePrompt } = buildPrompt(config.promptTier, validStyleId, index, ageTier, gender);
+        const { prompt, negativePrompt } = mode === 'premium'
+          ? buildPromptForImagen3(validStyleId, index, ageTier, gender)
+          : buildPrompt(config.promptTier, validStyleId, index, ageTier, gender);
 
         let resultBase64 = await aiProvider.generateImage(base64Image, mimeType, prompt, mode, additionalImages);
         let resultBuffer = Buffer.from(resultBase64, "base64");
