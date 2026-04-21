@@ -351,6 +351,7 @@ export class VertexAIProvider implements IGenerationProvider {
       );
     } catch (imagenErr: any) {
       const msg = (imagenErr?.message || String(imagenErr)).slice(0, 300);
+      console.error("🚨 IMAGEN FAILED: FALLING BACK TO FLASH", imagenErr);
       console.warn(`[PREMIUM] imagen failed → falling back to flash. err=${msg}`);
     }
 
@@ -376,12 +377,11 @@ export class VertexAIProvider implements IGenerationProvider {
     try {
       const client = createClient(slot, controller.signal, FLASH_LOCATION, FLASH_API_VERSION);
 
-      // Multimodal payload: image parts first, then text prompt with negative instructions.
+      // Multimodal payload: image parts first, then text prompt.
       const contents: any[] = refs.map(r => ({
         inlineData: { data: r.base64, mimeType: r.mimeType },
       }));
-      const promptWithNegative = `${prompt} Do NOT generate: ${NEGATIVE_PROMPT}.`;
-      contents.push({ text: promptWithNegative });
+      contents.push({ text: prompt });
 
       const response = await client.models.generateContent({
         model: FLASH_MODEL,
@@ -470,11 +470,13 @@ export class VertexAIProvider implements IGenerationProvider {
         parameters: {
           sampleCount: 1,
           aspectRatio: "9:16",
-          personGeneration: "allow_all",
+          personGeneration: "ALLOW_ADULT",
           negativePrompt: NEGATIVE_PROMPT,
           referenceImages: [...subjectRefs, faceMeshRef],
         },
       };
+
+      console.log("🔍 IMAGEN PAYLOAD:", JSON.stringify(body, null, 2));
 
       const fetchFn = (await import("node-fetch")).default || globalThis.fetch;
       const response = await fetchFn(url, {
