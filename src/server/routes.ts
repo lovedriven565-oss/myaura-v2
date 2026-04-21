@@ -960,18 +960,36 @@ apiRouter.post("/generate",
       let failedCount = 0;
       const successPaths: string[] = [];
       const errors: string[] = [];
+      // v3.6: Track which schedule indices failed so we can run a rescue pass
+      // after the main batch completes. This is the primary guarantee
+      // mechanism for "full pack delivery" — see rescue block below.
+      const failedIndices: number[] = [];
       let dbUpdateChain = Promise.resolve();
 
       // Interim status updates to Telegram
       const chatTarget = telegramChatId || telegramUserId;
       if (chatTarget) {
         sendTelegramStatus(chatTarget, "🎨 Анализируем ваш запрос...").catch(() => {});
-        setTimeout(() => {
-          sendTelegramStatus(chatTarget, "✨ Создаём вашу уникальную ауру...").catch(() => {});
-        }, 2500);
-        setTimeout(() => {
-          sendTelegramStatus(chatTarget, "🌟 Применяем финальные штрихи...").catch(() => {});
-        }, 6000);
+        if (mode === 'premium') {
+          // v3.6: Premium uses the heavy gemini-3-pro-image-preview model
+          // (4-6 min per image). Warn the user up front so they don't think
+          // the bot is stuck.
+          setTimeout(() => {
+            sendTelegramStatus(
+              chatTarget,
+              "💎 Premium-генерация запущена. Используется тяжелая Pro-модель максимального качества, " +
+              "процесс может занять от 3 до 10 минут (или больше, в зависимости от количества фото). " +
+              "Пожалуйста, подождите!"
+            ).catch(() => {});
+          }, 1500);
+        } else {
+          setTimeout(() => {
+            sendTelegramStatus(chatTarget, "✨ Создаём вашу уникальную ауру...").catch(() => {});
+          }, 2500);
+          setTimeout(() => {
+            sendTelegramStatus(chatTarget, "🌟 Применяем финальные штрихи...").catch(() => {});
+          }, 6000);
+        }
       }
 
       // Task for generating a single image (with quality gate + reroll)
@@ -1054,6 +1072,7 @@ apiRouter.post("/generate",
           }
         } else {
           failedCount++;
+          failedIndices.push(index);
           const errMsg = result.reason?.message || String(result.reason) || "Unknown error";
           errors.push(errMsg);
           console.error(`╔═══ [${id}] IMAGE ${index + 1}/${schedule.length} FAILED ═══╗`);
@@ -1089,6 +1108,75 @@ apiRouter.post("/generate",
 
       // Wait for any pending DB updates to flush
       await dbUpdateChain;
+
+      // ─── v3.6 Rescue Pass ─────────────────────────────────────────────
+      // Goal: guarantee the user receives the FULL pack they paid for, even
+      // under the heavy latency of gemini-3-pro-image-preview (4-6 min/img).
+      //
+      // Why this is safe:
+      //   - Runs through generationQueue, so it respects the global 6s
+      //     inter-request spacing and never thunders the Vertex endpoint.
+      //   - ai.ts already wraps each model call in withNetworkRetry (3×),
+      //     so by the time we reach here a failure is either: a persistent
+      //     upstream issue (rescue will also fail → we surface it), or a
+      //     transient issue whose next window happens to be clear (rescue
+      //     succeeds → user gets their photo).
+      //   - We cap at 1 rescue attempt per image to avoid runaway loops
+      //     on malformed prompts/refs.
+      //   - Each rescue success triggers progressive Telegram delivery so
+      //     the user sees photos trickle in rather than a delayed flood.
+      if (failedIndices.length > 0) {
+        const toRescue = [...failedIndices];
+        console.log(`[${id}] Rescue pass: re-running ${toRescue.length} failed image(s) | ` +
+          `currently ${completedCount}/${schedule.length} done`);
+        if (chatTarget && mode === 'premium') {
+          sendTelegramStatus(
+            chatTarget,
+            `🔄 Дорабатываем ${toRescue.length} фото для полного комплекта…`,
+          ).catch(() => {});
+        }
+        for (const idx of toRescue) {
+          const styleId = schedule[idx];
+          try {
+            const resultPath = await generationQueue.add(() => generateOne(styleId, idx)) as string;
+            // Mutate counters (same invariants as onItemComplete fulfilled branch)
+            completedCount++;
+            failedCount = Math.max(0, failedCount - 1);
+            successPaths.push(resultPath);
+            // Drop this index from failedIndices bookkeeping
+            const fiPos = failedIndices.indexOf(idx);
+            if (fiPos >= 0) failedIndices.splice(fiPos, 1);
+            console.log(`[${id}] Rescue ✓ image ${idx + 1}/${schedule.length} recovered ` +
+              `(${completedCount}/${schedule.length} done)`);
+
+            // Progressive delivery for premium (free is single-image and is
+            // sent via deliverTelegramResults at the end).
+            if (mode === 'premium' && chatTarget) {
+              deliverTelegramPhoto(chatTarget, resultPath).catch(err =>
+                console.error(`[${id}] Rescue delivery failed for image ${idx + 1}: ${err.message}`)
+              );
+            }
+
+            // Progressive DB heartbeat so the watchdog doesn't reclaim us
+            // mid-rescue and so the frontend /status poll sees progress.
+            await db.from("generations").update({
+              results_completed: completedCount,
+              results_failed: failedCount,
+              result_path: successPaths[0] || null,
+              result_paths: [...successPaths],
+              last_heartbeat_at: new Date().toISOString(),
+            }).eq("id", id);
+          } catch (rescueErr: any) {
+            const rescueMsg = rescueErr?.message || String(rescueErr) || "Unknown rescue error";
+            errors.push(`[rescue] ${rescueMsg}`);
+            console.error(`[${id}] Rescue ✗ image ${idx + 1}/${schedule.length} still failed: ` +
+              rescueMsg.slice(0, 200));
+          }
+        }
+        console.log(`[${id}] Rescue pass done: ${completedCount}/${schedule.length} total | ` +
+          `${failedIndices.length} still failed`);
+      }
+      // ─── End Rescue Pass ─────────────────────────────────────────────
 
       // Determine final status
       // completed = all succeeded, partial = some succeeded, failed = none succeeded

@@ -46,8 +46,22 @@ steps:
       - '10'
       - '--min-instances'
       - '1'
+      # v3.6: Pro-model generations can take 4-6 min per image. A pack of 10
+      # premium photos therefore needs a long request window. /generate still
+      # returns {id, status:"processing"} quickly; the timeout protects the
+      # watchdog/heartbeat endpoints and any synchronous slow path.
       - '--timeout'
-      - '300'
+      - '900'
+      # v3.6: CRITICAL for long batch delivery. Without this, Cloud Run
+      # throttles CPU to ~0 after /generate has responded, which stalls the
+      # background image loop and causes partial-pack failures on premium.
+      # --no-cpu-throttling keeps CPU allocated for the full life of the
+      # instance so the background batch always makes progress.
+      - '--no-cpu-throttling'
+      # v3.6: Gen2 execution environment is required for --no-cpu-throttling
+      # and gives us proper Linux networking (fewer "fetch failed" events).
+      - '--execution-environment'
+      - 'gen2'
       - '--set-env-vars'
       - 'NODE_ENV=production'
       - '--set-env-vars'

@@ -40,6 +40,59 @@ function stringifyErrorDetails(value: unknown): string {
   }
 }
 
+// ─── Transient network error detection (v3.6) ───────────────────────────────
+// The gemini-3-pro-image-preview endpoint occasionally drops TCP mid-response
+// ("fetch failed", "other side closed", ECONNRESET, socket hang up) and
+// sometimes returns 500/503 under load. These are retryable: the quota is
+// still healthy, only the transport broke. 429/403/404 are NOT handled here —
+// those are classified elsewhere (billing / IAM / quota).
+function isTransientNetworkError(err: any): boolean {
+  const msg = (err?.message || String(err || "")).toLowerCase();
+  const status = err?.status ?? err?.error?.code ?? err?.code;
+
+  if (status === 500 || status === 502 || status === 503 || status === 504) return true;
+  if (err?.isTimeout === true) return true;                 // our own AbortError translation
+  if (err?.name === "AbortError") return true;
+  if (msg.includes("fetch failed")) return true;
+  if (msg.includes("other side closed")) return true;
+  if (msg.includes("socket hang up")) return true;
+  if (msg.includes("econnreset")) return true;
+  if (msg.includes("etimedout")) return true;
+  if (msg.includes("econnaborted")) return true;
+  if (msg.includes("network error")) return true;
+  if (msg.includes("upstream connect error")) return true;
+  if (msg.includes("terminated") && msg.includes("socket")) return true;
+
+  return false;
+}
+
+const NETWORK_RETRY_MAX_ATTEMPTS = 2;   // 2 retries on top of the initial try = 3 total
+const NETWORK_RETRY_DELAY_MS     = 10_000;
+
+async function withNetworkRetry<T>(
+  op: () => Promise<T>,
+  opName: string,
+): Promise<T> {
+  let lastErr: any;
+  for (let attempt = 0; attempt <= NETWORK_RETRY_MAX_ATTEMPTS; attempt++) {
+    try {
+      return await op();
+    } catch (err: any) {
+      lastErr = err;
+      if (!isTransientNetworkError(err) || attempt >= NETWORK_RETRY_MAX_ATTEMPTS) {
+        throw err;
+      }
+      const waitMs = NETWORK_RETRY_DELAY_MS;
+      console.warn(
+        `[NetRetry] ${opName} transient failure (attempt ${attempt + 1}/${NETWORK_RETRY_MAX_ATTEMPTS + 1}): ` +
+        `${(err?.message || String(err)).slice(0, 160)} — retrying in ${waitMs}ms`
+      );
+      await new Promise(r => setTimeout(r, waitMs));
+    }
+  }
+  throw lastErr;
+}
+
 /**
  * Exponential backoff with jitter for resilient API calls
  * Formula: min(t_max, t_base * 2^attempt + random_jitter)
@@ -465,11 +518,19 @@ export class VertexAIProvider implements IGenerationProvider {
       : (isPreviewModel ? 'v1beta1' : (apiVersion || 'v1'));
     const effectiveLocation = isPreviewModel ? VERTEX_AI_PREVIEW_LOCATION : VERTEX_LOCATION;
 
-    console.log(`[v3.5-GLOBAL-FIX] [Tier: ${tier}] L1 → ${l1Model} (${effectiveApiVersion}) | region=${effectiveLocation} | key ...${slot.keyHint}`);
+    console.log(`[v3.6-HARDEN] [Tier: ${tier}] L1 → ${l1Model} (${effectiveApiVersion}) | region=${effectiveLocation} | key ...${slot.keyHint}`);
 
     try {
-      const result = await this._callModel(slot, l1Model, contents, mode, effectiveLocation, effectiveApiVersion);
-      console.log(`[v3.5-GLOBAL-FIX] L1 SUCCESS | model=${l1Model}@${effectiveLocation}`);
+      // v3.6: Wrap in withNetworkRetry to absorb transient Vertex transport
+      // failures (fetch failed / other side closed / 500 / 503 / socket hang
+      // up). Two retries, 10s apart. The underlying AbortController timeout
+      // still fires at MODEL_CALL_TIMEOUT_MS per attempt, so worst-case
+      // latency per image is bounded by ~3 * 120s + 2 * 10s = 380s on Pro.
+      const result = await withNetworkRetry(
+        () => this._callModel(slot, l1Model, contents, mode, effectiveLocation, effectiveApiVersion),
+        `L1 ${l1Model}@${effectiveLocation}`,
+      );
+      console.log(`[v3.6-HARDEN] L1 SUCCESS | model=${l1Model}@${effectiveLocation}`);
       return result;
     } catch (l1Err: any) {
       const l1Msg = l1Err?.message || "";
