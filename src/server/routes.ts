@@ -2,13 +2,12 @@ import { Router } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "./db.js";
 import { storage } from "./storage.js";
-import { aiProvider } from "./ai.js";
-import { buildPrompt, buildPromptForImagen3, StyleId, AgeTier, Gender } from "./prompts.js";
-import { validatePackageInput, buildStyleSchedule, buildStyleScheduleWithCount, runBatched, getGenerationConfig, PACKAGES, generationQueue } from "./packages.js";
+import { aiProvider, ImageRef } from "./ai.js";
+import { buildFreePrompt, buildPremiumPrompt, StyleId } from "./prompts.js";
+import { validatePackageInput, buildStyleScheduleWithCount, runBatched, getGenerationConfig, PACKAGES, generationQueue } from "./packages.js";
 import { deliverTelegramPhoto, deliverTelegramResults, notifyReferralAwarded, sendTelegramStatus } from "./telegram.js";
-import { selectBestReferencePhotos } from "./inputCuration.js";
-import { evaluateGeneratedPhoto, clearRerollTracking } from "./qualityGate.js";
-import { enqueueGeneration, refundCredit, checkRateLimit, clearRateLimit } from "./dbQueue.js";
+import { clearRerollTracking } from "./qualityGate.js";
+import { refundCredit, checkRateLimit, clearRateLimit } from "./dbQueue.js";
 import { updateGenerationHeartbeat } from "./watchdog.js";
 import {
   MAX_FILE_SIZE_BYTES,
@@ -475,8 +474,10 @@ const GenerateBodySchema = z.object({
   packageId: z.enum(["free", "starter", "pro", "max"]),
   mode: z.enum(["preview", "premium"]),
   styleIds: z.array(StyleIdEnum).min(1, "At least one style is required").max(6),
-  ageTier: z.enum(["young", "mature", "distinguished"]).default("young"),
-  gender: z.enum(["male", "female", "unset"]).default("unset"),
+  // Legacy fields — accepted for backward-compat with older clients but no
+  // longer used (V6.0 preserves identity/age via Imagen Subject Customization).
+  ageTier: z.enum(["young", "mature", "distinguished"]).optional(),
+  gender: z.enum(["male", "female", "unset"]).optional(),
   telegramUserId: z.coerce.number().int().positive(),
   telegramChatId: z.coerce.number().int().optional(),
   // R2 object keys returned by /api/upload-urls. Regex enforces our canonical
@@ -786,36 +787,7 @@ apiRouter.post("/generate",
     // ─── Strict Credits Consumption: 1 photo = 1 credit ───────────────
     // mode: 'premium' = only paid_credits; 'preview' = free first, then paid
     const mode: "premium" | "preview" = body.mode;
-    const ageTier: AgeTier = body.ageTier;
-    const gender: Gender = body.gender;
-    console.log(`[${id}] ageTier=${ageTier} gender=${gender} mode=${mode}`);
-
-    // ── Free V2: quality-gate BEFORE credit consumption ──────────────
-    const FREE_V2 = process.env.FREE_MULTI_REF_V2_ENABLED === "true";
-    let freeV2CuratedIndices: number[] = [];
-
-    if (FREE_V2 && mode !== 'premium' && imageFiles.length > 1) {
-      const curation = await selectBestReferencePhotos(
-        imageFiles.map(f => ({ buffer: f.buffer, originalname: f.originalname })),
-        { mode: 'free' },
-      );
-      console.log(`[${id}] [FREE_V2] Curation: ${imageFiles.length}→${curation.selectedIndices.length} selected | ${curation.telemetry.latencyMs}ms`);
-      if (curation.warnings.length > 0) {
-        console.log(`[${id}] [FREE_V2] Warnings: ${curation.warnings.join('; ')}`);
-      }
-      if (curation.hardReject) {
-        console.warn(`[${id}] [FREE_V2] HARD REJECT: ${curation.hardRejectReason}`);
-        // Quality-gate rejection is a pre-consumption failure — the user never
-        // burned a credit, so the rate-limit stamp would be unfair punishment.
-        if ((req as any).rateLimitStamped) await clearRateLimit(body.telegramUserId);
-        return res.status(400).json({
-          error: curation.hardRejectReason,
-          code: "PHOTO_QUALITY_REJECTED",
-        });
-      }
-      freeV2CuratedIndices = curation.selectedIndices;
-      console.log(`[${id}] [FREE_V2] Selected indices: [${freeV2CuratedIndices.join(',')}]`);
-    }
+    console.log(`[${id}] mode=${mode} package=${packageId} refs=${imageFiles.length} outputs=${outputCount}`);
 
     if (telegramUserId) {
       const { data: user, error: userError } = await db
@@ -929,31 +901,13 @@ apiRouter.post("/generate",
       const genConfig = getGenerationConfig(config.id);
       console.log(`[${id}] Schedule: ${schedule.length} images, concurrency=${genConfig.concurrency}, delay=${genConfig.delayMs}ms`);
 
-      // Resolve final reference files for generation
-      // Free V2 (flag ON): use pre-curated files from quality gate above
-      // All other cases: use original uploaded files (stable behavior)
-      const finalFiles = (FREE_V2 && mode !== 'premium' && freeV2CuratedIndices.length > 0)
-        ? freeV2CuratedIndices.map(i => imageFiles[i])
-        : imageFiles;
+      // Prepare references for AI provider — all uploaded images become refs.
+      const refs: ImageRef[] = imageFiles.map(file => ({
+        base64: file.buffer.toString("base64"),
+        mimeType: file.mimetype,
+      }));
 
-      // Prepare images for AI provider
-      const baseFile = finalFiles[0];
-      const base64Image = baseFile.buffer.toString("base64");
-      const mimeType = baseFile.mimetype;
-      
-      // Additional reference images
-      // Premium: pass all uploaded refs (original stable behavior, unchanged)
-      // Free V2 (flag ON): pass curated additional refs
-      // Free (flag OFF): no additional images (single file only)
-      let additionalImages: string[] = [];
-      if (mode === 'premium' && imageFiles.length > 1) {
-        additionalImages = imageFiles.slice(1).map(file => file.buffer.toString("base64"));
-      } else if (FREE_V2 && mode !== 'premium' && finalFiles.length > 1) {
-        additionalImages = finalFiles.slice(1).map(file => file.buffer.toString("base64"));
-      }
-
-      // Session isolation trace
-      console.log(`[${id}] SESSION CONTEXT: userId=${telegramUserId}, refs=${finalFiles.length}, base64Len=${base64Image.length}, additionalRefs=${additionalImages.length}, freeV2=${FREE_V2}`);
+      console.log(`[${id}] SESSION: userId=${telegramUserId}, refs=${refs.length}, mode=${mode}`);
 
       // Progressive state tracking
       let completedCount = 0;
@@ -992,65 +946,31 @@ apiRouter.post("/generate",
         }
       }
 
-      // Task for generating a single image (with quality gate + reroll)
-      const generateOne = async (styleId: StyleId, index: number) => {
-        // Defensive: ensure valid StyleId, fallback to business only if undefined
-        const validStyleIds: StyleId[] = [
-          "business", "lifestyle", "aura", "cinematic", "luxury", "editorial",
-          "cyberpunk", "corporate", "ethereal",
-        ];
-        const validStyleId: StyleId = (styleId && validStyleIds.includes(styleId)) ? styleId : "business";
+      // Task for generating a single image. Routes cleanly to the V6.0
+      // tier method based on the request mode — no fallback branching here,
+      // that lives in ai.ts.
+      const VALID_STYLES: StyleId[] = [
+        "business", "lifestyle", "aura", "cinematic", "luxury", "editorial",
+        "cyberpunk", "corporate", "ethereal",
+      ];
+
+      const generateOne = async (styleId: StyleId, index: number): Promise<string> => {
+        const validStyleId: StyleId = (styleId && VALID_STYLES.includes(styleId)) ? styleId : "business";
         if (validStyleId !== styleId) {
           console.warn(`[${id}] Image ${index}: Invalid styleId "${styleId}", falling back to business`);
         }
-        console.log(`[${id}] Image ${index}: Generating with style="${validStyleId}", tier="${config.promptTier}"`);
-        const { prompt, negativePrompt } = mode === 'premium'
-          ? buildPromptForImagen3(validStyleId, index, ageTier, gender)
-          : buildPrompt(config.promptTier, validStyleId, index, ageTier, gender);
 
-        let resultBase64 = await aiProvider.generateImage(base64Image, mimeType, prompt, mode, additionalImages);
-        let resultBuffer = Buffer.from(resultBase64, "base64");
+        const prompt = mode === "premium"
+          ? buildPremiumPrompt(validStyleId, index)
+          : buildFreePrompt(validStyleId, index);
 
-        // Quality gate (premium only)
-        if (mode === 'premium') {
-          const gate = await evaluateGeneratedPhoto(
-            base64Image, resultBase64, resultBuffer, mimeType, styleId, id, index
-          );
+        console.log(`[${id}] Image ${index}: tier=${mode} style=${validStyleId}`);
 
-          if (gate.shouldReroll) {
-            console.log(`[${id}] Image ${index}: quality gate failed (score=${gate.score.overallScore}), attempting reroll...`);
-            // Memory optimisation: release the stale output (~4–8 MB per
-            // variable for a 10-ref premium generation) BEFORE we allocate
-            // the reroll's buffers. Without this, the old base64+Buffer +
-            // the new base64+Buffer + SDK internal copies + the ~40 MB
-            // reference context live simultaneously on a 2 GiB container,
-            // causing GC storms that manifest as "[NODE-CRON] missed
-            // execution" and a frozen reroll worker that watchdog
-            // zombie-reclaims after 10 min. Explicit reassignment hints v8
-            // that the old allocations are unreachable.
-            const staleBuffer = resultBuffer;
-            resultBase64 = "";
-            resultBuffer = Buffer.alloc(0);
-            void staleBuffer;
-            try {
-              // A2: Reroll must also respect the global queue and rate limits
-              resultBase64 = await generationQueue.add(() =>
-                aiProvider.generateImage(base64Image, mimeType, prompt, mode, additionalImages)
-              ) as string;
-              resultBuffer = Buffer.from(resultBase64, "base64");
-              // Intentionally NOT re-invoking evaluateGeneratedPhoto here:
-              //   (a) reroll policy already forbids a second reroll
-              //       (MAX_REROLLS_PER_IMAGE), so the result is logging-only,
-              //   (b) the judge call itself ships ref+generated as base64
-              //       into Vertex (another ~10 MB payload) which is exactly
-              //       the memory pressure we just mitigated.
-              console.log(`[${id}] Image ${index}: reroll completed, accepting output`);
-            } catch (rerollErr: any) {
-              console.warn(`[${id}] Image ${index}: reroll failed: ${rerollErr.message}, using original`);
-            }
-          }
-        }
+        const resultBase64 = mode === "premium"
+          ? await aiProvider.generatePremiumTier(refs, prompt)
+          : await aiProvider.generateFreeTier(refs, prompt);
 
+        const resultBuffer = Buffer.from(resultBase64, "base64");
         const resultPath = await storage.save(resultBuffer, `${id}_result_${index}.jpg`, "result");
         return resultPath;
       };
