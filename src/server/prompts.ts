@@ -23,18 +23,25 @@ export interface DebugPromptParts {
   index: number;
 }
 
-// ─── V11 "Tag Cascade" Architecture ────────────────────────────────────────
+// ─── V12 "Geometry Lock" Architecture ──────────────────────────────────────
 //
 // Design philosophy:
-//   Short comma-separated tags force the model into "photography" mode instead
-//   of "CGI description" mode. No numbered lists, no all-caps mandates, no
-//   long sentences. Just camera-first optical anchors followed by likeness tags.
+//   1. CAMERA-FIRST MEDIUM OVERRIDE. The very first tokens force the model into
+//      "raw photo" mode: "Authentic candid photograph, raw unretouched skin
+//      texture, visible pores, natural facial imperfections, direct flash lighting,
+//      extremely high detail". This kills the plastic/CGI bias at token 0.
 //
-//   FREE tier  → Clean tag cascade on Kodak-style film stock.
-//                Enough skin and asymmetry tags to avoid plastic faces.
+//   2. STRICT GEOMETRY ANCHORS in CAPS. PRESERVE EXACT HAIRCUT GEOMETRY AND
+//      TEXTURE FROM REFERENCE is an all-caps mandate that overrides the model's
+//      tendency to standardise hairstyles per style (e.g. Corporate).
 //
-//   PREMIUM    → Full optical payload: sensor, lens, film grain, catchlights.
-//                gemini-3-pro-image-preview reasons through the tag cloud.
+//   3. PUNCHY COMMA-SEPARATED KEYWORDS only. No flowing sentences, no narrative
+//      descriptions. Each tag is a discrete visual constraint the model parses
+//      independently. This prevents "reasoning" the face into a beauty filter.
+//
+//   4. COMPRESSED NEGATIVE PROMPT. Only the critical anti-plastic anchors remain:
+//      altered face geometry, smooth skin, beauty filter, different haircut.
+//      Vertex AI parses short negative lists more reliably than long litanies.
 
 export const CORE_STYLES: readonly StyleId[] = Object.freeze([
   "business",
@@ -60,7 +67,7 @@ interface StyleBlock {
   mood: string;
 }
 
-// ── Style tag blocks: short comma-separated phrases only ────────────────────
+// ── Style tag blocks: punchy comma-separated keywords only ──────────────────
 const STYLE_BLOCKS: Record<StyleId, StyleBlock> = {
   business: {
     subject: "sharply tailored dark suit, crisp white shirt, composed professional posture",
@@ -119,75 +126,71 @@ const VARIETY_FRAMINGS = [
   "relaxed posture three-quarter portrait",
 ];
 
-// ── Camera-first optical anchors ────────────────────────────────────────────
-const FREE_AESTHETIC_SUFFIX =
-  "authentic candid photograph, shot on Kodak Portra 400, 85mm f/1.4 lens, ultra-detailed, " +
-  "raw unedited photo, shallow depth of field, natural creamy bokeh, " +
-  "visible skin pores, natural micro-texture, subtle subsurface scattering on ears and nose, " +
-  "accurate daylight color science, no digital smoothing, no beauty filter, no AI gloss, " +
-  "preserve every facial asymmetry, freckle, natural imperfection exactly as in the reference";
+// ── V12 Medium Override: forces "photo" mode at token 0 ───────────────────
+const MEDIUM_OVERRIDE =
+  "Authentic candid photograph, raw unretouched skin texture, visible pores, natural facial imperfections, " +
+  "direct flash lighting, extremely high detail";
 
-const PREMIUM_AESTHETIC_SUFFIX =
-  "authentic candid photograph, shot on Sony A7 IV full-frame sensor, Sony GM 85mm f/1.4 prime lens at f/2.0, ultra-detailed, " +
-  "raw unedited photo, shallow depth of field with creamy natural bokeh roll-off, " +
-  "neutral daylight color science, accurate skin tone reproduction without warmth injection, subtle 35mm organic film grain, " +
-  "hyper-realistic skin micro-texture, visible pores, fine vellus hair, natural sebum sheen on T-zone, subsurface scattering on ears nose cheeks, no plastic smoothing, no pore erasure, " +
-  "asymmetric catchlights matching ambient source, preserved iris pattern detail, limbal ring thickness, correct sclera vascularity, anatomically correct hand articulation, knuckle definition, " +
-  "no digital retouching, no frequency separation, no dodge and burn, no skin smoothing, no teeth whitening, no eye brightening, no jawline sharpening, no cheekbone enhancement, no lip plumping, " +
-  "Vogue-tier composition, commercial-grade RAW fidelity, gallery-print micro-contrast";
-
-// ── Simplified negative prompt (shared, no tier split) ─────────────────────
-const NEGATIVE_PROMPT =
-  "3D render, CGI, plastic, beauty filter, smooth skin, cartoon, different person, altered facial features, " +
-  "changed eye color, distorted anatomy, extra fingers, malformed hands, text artifacts, watermarks, " +
-  "symmetry correction, skin smoothing, pore erasure, baby face filter, age regression, age advancement, " +
-  "wax complexion, synthetic hair, over-retouched porcelain, uncanny AI gloss, digital makeup, teeth whitening, " +
-  "eye enlargement, lip plumping, cheekbone enhancement, jawline sharpening, rubber-band jawline, smeared irises, " +
-  "blurred pores, porcelain doll effect, Instagram filter, Snapchat filter, frequency separation, dodge and burn";
-
-// ── Identity core: likeness tags only ───────────────────────────────────────
-const LIKENESS_TAGS =
-  "exact facial likeness to reference, raw unedited skin texture, visible pores, natural facial asymmetry, " +
-  "identical bone structure, preserved eye socket shape, brow ridge contour, nose bridge width and tip geometry, " +
-  "lip fullness and Cupid's bow, jawline angle, chin projection, ear shape, " +
-  "natural eye size differences, eyebrow height variance, nose deviation, jaw asymmetry, " +
-  "exact pore density, natural sebum sheen, stubble pattern, acne, freckles, moles, scar tissue, " +
-  "under-eye hollows, nasolabial fold depth, exact iris color and pattern, limbal ring thickness, " +
-  "correct sclera vascularity, asymmetric catchlights matching ambient source";
-
-function describeDemographics(gender: Gender, ageTier: AgeTier): string {
-  const ageTags =
+// ── V12 Identity Anchors: strict geometry fixation ────────────────────────
+function buildGeometryLock(ageTier: AgeTier): string {
+  const ageLock =
     ageTier === "young"
-      ? "mid-twenties age lock, youthful skin texture, adult facial proportions, cheekbone height, jaw width, no baby-face filter, no cheek puffing, no oversized eyes, no reduced nose bridge, no lip plumping"
+      ? "young adult age lock"
       : ageTier === "mature"
-      ? "mid-thirties age lock, early expression lines, natural forehead texture, slight crow's feet, mature skin density, no youth filter, no wrinkle erasure, no skin tightening, no glow enhancement, no eye bag removal"
-      : "late-forties age lock, distinguished graying temples, natural forehead lines, crow's feet, nasolabial folds, slight jowl definition, mature skin laxity, no age regression, no gray hair removal, no wrinkle flattening, no skin lifting, no brightness injection";
+      ? "mature adult age lock"
+      : "distinguished adult age lock";
 
-  const genderTags =
-    gender === "male"
-      ? "masculine presentation, Adam's apple visibility, brow bossing, facial hair density, masculine skin texture"
-      : gender === "female"
-      ? "feminine presentation, lip vermillion definition, lash density, feminine bone structure"
-      : "gender presentation faithfully mirrored from references, no stereotyping, no exaggeration";
-
-  return `${ageTags}, ${genderTags}`;
+  return [
+    "Extreme facial likeness to reference",
+    "strict adherence to reference facial bone structure",
+    "preserve original jawline geometry and cheekbone height",
+    "PRESERVE EXACT HAIRCUT GEOMETRY AND TEXTURE FROM REFERENCE",
+    "no hair volume alteration",
+    ageLock,
+  ].join(", ");
 }
 
-function buildV11Prompt(
+// ── V12 Demographics: gender + expression + catchlights only ─────────────────
+function buildDemographics(gender: Gender, ageTier: AgeTier): string {
+  const genderTag =
+    gender === "male"
+      ? "male"
+      : gender === "female"
+      ? "female"
+      : "gender-neutral";
+
+  const ageTag =
+    ageTier === "young"
+      ? "mid-twenties age lock, youthful skin texture, adult facial proportions, no baby-face filter, no cheek puffing, no oversized eyes"
+      : ageTier === "mature"
+      ? "mid-thirties age lock, early expression lines, natural forehead texture, slight crow's feet, no youth filter, no wrinkle erasure"
+      : "late-forties age lock, distinguished graying temples, natural forehead lines, crow's feet, nasolabial folds, no age regression, no wrinkle flattening";
+
+  return `${genderTag}, natural expression, realistic Catchlights, ${ageTag}`;
+}
+
+// ── V12 Negative Prompt: compressed critical anchors only ──────────────────
+const NEGATIVE_PROMPT =
+  "different person, smooth skin, beauty filter, altered face geometry, different haircut, " +
+  "different hair texture, extra hair volume, plastic face, CGI, 3D render, cartoon, " +
+  "digital makeup, teeth whitening, jawline sharpening, asymmetry correction, over-optimization";
+
+function buildV12Prompt(
   gender: Gender,
   styleId: StyleId,
   ageTier: AgeTier,
-  mode: PromptType,
+  _mode: PromptType,
   index: number,
 ): string {
   const styleBlock = STYLE_BLOCKS[styleId] || STYLE_BLOCKS.business;
   const framing = VARIETY_FRAMINGS[index % VARIETY_FRAMINGS.length];
-  const demographics = describeDemographics(gender, ageTier);
+  const geometryLock = buildGeometryLock(ageTier);
+  const demographics = buildDemographics(gender, ageTier);
 
-  // Camera-first tag cascade: camera, likeness, demographics, framing, subject, environment, mood, optical suffix
+  // V12 cascade: Medium Override → Geometry Lock → Demographics → Framing → Subject → Environment → Mood
   return [
-    mode === "premium" ? PREMIUM_AESTHETIC_SUFFIX : FREE_AESTHETIC_SUFFIX,
-    LIKENESS_TAGS,
+    MEDIUM_OVERRIDE,
+    geometryLock,
     demographics,
     framing,
     styleBlock.subject,
@@ -197,7 +200,6 @@ function buildV11Prompt(
 }
 
 function buildNegativePrompt(_mode: PromptType): string {
-  // Simplified: one clean negative prompt for both tiers
   return NEGATIVE_PROMPT;
 }
 
@@ -208,11 +210,11 @@ export function buildPromptProfile(
   ageTier: AgeTier = "young",
   gender: Gender = "unset",
 ): { positivePrompt: string; negativePrompt: string; debugPromptParts: DebugPromptParts } {
-  const positivePrompt = buildV11Prompt(gender, styleId, ageTier, mode, index);
+  const positivePrompt = buildV12Prompt(gender, styleId, ageTier, mode, index);
   const negativePrompt = buildNegativePrompt(mode);
 
   const debugPromptParts: DebugPromptParts = {
-    version: "V11-TagCascade",
+    version: "V12-GeometryLock",
     styleId,
     mode,
     gender,
@@ -221,7 +223,7 @@ export function buildPromptProfile(
   };
 
   console.log(
-    `[PROMPT V11-TagCascade] style=${styleId} mode=${mode} gender=${gender} age=${ageTier} idx=${index}`,
+    `[PROMPT V12-GeometryLock] style=${styleId} mode=${mode} gender=${gender} age=${ageTier} idx=${index}`,
   );
   return { positivePrompt, negativePrompt, debugPromptParts };
 }
