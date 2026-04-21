@@ -18,9 +18,9 @@ export interface IGenerationProvider {
 //   DEPTH, and TEMPERATURE — NOT in model choice.
 const UNIFIED_MODEL = "gemini-3.1-flash-image-preview";
 const IMAGEN_3_GENERATE_MODEL = "imagen-3.0-generate-001";
-// v5.0: Imagen 3 Capability model is REQUIRED for Subject Customization.
-// The generate model does NOT support referenceImages with subjectImageConfig.
-const IMAGEN_3_CAPABILITY_MODEL = "imagen-3.0-capability-001";
+// v5.0: Use proven generate-001 model with Subject Customization fields.
+// capability-001 does not exist on any endpoint (404 confirmed).
+const IMAGEN_3_SUBJECT_MODEL = process.env.IMAGEN_3_SUBJECT_MODEL || "imagen-3.0-generate-001";
 
 // ─── v5.0 Instant Tuning / Subject Customization Feature Flags ──────────────
 //   Vertex AI "Instant Tuning" for Imagen 3 is an experimental pipeline.
@@ -45,7 +45,7 @@ const MAX_DELAY_MS = 60000;  // cap at 60s
 const MODEL_CALL_TIMEOUT_MS: Record<string, number> = {
   ["gemini-2.5-flash-image"]:          90_000,
   ["gemini-3.1-flash-image-preview"]:  90_000,
-  [IMAGEN_3_CAPABILITY_MODEL]:          120_000, // Subject Customization is heavier
+  [IMAGEN_3_SUBJECT_MODEL]:          120_000, // Subject Customization is heavier
 };
 const DEFAULT_CALL_TIMEOUT_MS = 90_000;
 
@@ -553,12 +553,12 @@ export class VertexAIProvider implements IGenerationProvider {
     const client = await auth.getClient();
     const accessToken = await client.getAccessToken();
 
-    // v5.0-FIX: imagen-3.0-capability-001 for Subject Customization is ONLY available
-    // on regional endpoints (us-central1 confirmed). global returns 404.
+    // v5.0-FIX: Imagen 3 predict endpoint requires a regional location.
+    // Default to us-central1 (confirmed working for generate-001).
     const IMAGEN3_SUBJECT_LOCATION = process.env.VERTEX_AI_IMAGEN3_LOCATION || 'us-central1';
     const location = IMAGEN3_SUBJECT_LOCATION;
     // v5.0: Subject Customization is on v1beta1 (preview API)
-    const url = `https://${location}-aiplatform.googleapis.com/v1beta1/projects/${slot.projectId || VERTEX_ADC_PROJECT}/locations/${location}/publishers/google/models/${IMAGEN_3_CAPABILITY_MODEL}:predict`;
+    const url = `https://${location}-aiplatform.googleapis.com/v1beta1/projects/${slot.projectId || VERTEX_ADC_PROJECT}/locations/${location}/publishers/google/models/${IMAGEN_3_SUBJECT_MODEL}:predict`;
     console.log(`[v5.0-IMAGEN3-SUBJ] Predict URL: ${url}`);
 
     // ── Reference images ──────────────────────────────────────────────────
@@ -877,7 +877,7 @@ export class VertexAIProvider implements IGenerationProvider {
    * v5.0 PREMIUM PIPELINE:
    *   1. EXPERIMENTAL: If VERTEX_AI_TUNING_ENABLED, attempt Instant Tuning
    *      (CustomJob → poll → generate with tuned endpoint → cleanup).
-   *   2. PRIMARY: Imagen 3 Subject Customization (imagen-3.0-capability-001)
+   *   2. PRIMARY: Imagen 3 Subject Customization (imagen-3.0-generate-001)
    *      with subjectImageConfig + face-mesh CONTROL reference.
    *   3. FALLBACK: Unified flash model (gemini-3.1-flash-image-preview).
    *
@@ -928,7 +928,7 @@ export class VertexAIProvider implements IGenerationProvider {
 
     // ─── Premium: Imagen 3 Subject Customization (primary path) ──────────────
     if (mode === 'premium') {
-      console.log(`[v5.0-IMAGEN3-SUBJ] [Tier: PREMIUM] Attempting ${IMAGEN_3_CAPABILITY_MODEL} | key ...${slot.keyHint}`);
+      console.log(`[v5.0-IMAGEN3-SUBJ] [Tier: PREMIUM] Attempting ${IMAGEN_3_SUBJECT_MODEL} | key ...${slot.keyHint}`);
       try {
         const result = await withNetworkRetry(
           () => this._callImagen3SubjectCustomization(slot, prompt, originalImageBase64, mimeType, additionalImages),
@@ -941,12 +941,12 @@ export class VertexAIProvider implements IGenerationProvider {
         const imagenCls = classifyError(imagenErr, imagenMsg, imagenErr?.details || [], [imagenMsg, stringifyErrorDetails(imagenErr)].join(" "));
 
         if (imagenCls.isModelPermission || imagenCls.isNotFound || imagenCls.isBilling) {
-          console.warn(`[v5.0-IMAGEN3-SUBJ] ${IMAGEN_3_CAPABILITY_MODEL} unavailable (${imagenMsg.slice(0, 160)}). Falling back to flash.`);
+          console.warn(`[v5.0-IMAGEN3-SUBJ] ${IMAGEN_3_SUBJECT_MODEL} unavailable (${imagenMsg.slice(0, 160)}). Falling back to flash.`);
         } else if (imagenCls.is429) {
           markKeyCooldown(slot);
-          console.warn(`[v5.0-IMAGEN3-SUBJ] 429 on ${IMAGEN_3_CAPABILITY_MODEL}. Falling back to flash.`);
+          console.warn(`[v5.0-IMAGEN3-SUBJ] 429 on ${IMAGEN_3_SUBJECT_MODEL}. Falling back to flash.`);
         } else {
-          console.warn(`[v5.0-IMAGEN3-SUBJ] ${IMAGEN_3_CAPABILITY_MODEL} failed (${imagenMsg.slice(0, 160)}). Falling back to flash.`);
+          console.warn(`[v5.0-IMAGEN3-SUBJ] ${IMAGEN_3_SUBJECT_MODEL} failed (${imagenMsg.slice(0, 160)}). Falling back to flash.`);
         }
         // Intentional fall-through to flash fallback below
       }
