@@ -553,9 +553,13 @@ export class VertexAIProvider implements IGenerationProvider {
     const client = await auth.getClient();
     const accessToken = await client.getAccessToken();
 
-    // Subject Customization requires a regional endpoint (us-central1 or europe-west4)
-    const location = VERTEX_LOCATION === 'global' ? 'us-central1' : VERTEX_LOCATION;
+    // v5.0-FIX: imagen-3.0-capability-001 for Subject Customization is ONLY available
+    // in select regions (us-central1, europe-west1 confirmed). europe-west4 returns 401.
+    // We hardcode us-central1 for this model regardless of VERTEX_LOCATION.
+    const IMAGEN3_SUBJECT_LOCATION = process.env.VERTEX_AI_IMAGEN3_LOCATION || 'us-central1';
+    const location = IMAGEN3_SUBJECT_LOCATION;
     const url = `https://${location}-aiplatform.googleapis.com/v1/projects/${slot.projectId || VERTEX_ADC_PROJECT}/locations/${location}/publishers/google/models/${IMAGEN_3_CAPABILITY_MODEL}:predict`;
+    console.log(`[v5.0-IMAGEN3-SUBJ] Predict URL: ${url}`);
 
     // ── Reference images ──────────────────────────────────────────────────
     // Primary subject reference (referenceId: 1) — the face we want to preserve
@@ -627,7 +631,8 @@ export class VertexAIProvider implements IGenerationProvider {
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`Imagen 3 Subject Customization predict failed: ${response.status} ${errorText}`);
+      console.error(`[v5.0-IMAGEN3-SUBJ] HTTP ${response.status} from ${url}: ${errorText.slice(0, 800)}`);
+      throw new Error(`Imagen 3 Subject Customization predict failed: ${response.status} ${errorText.slice(0, 400)}`);
     }
 
     const data = await response.json() as any;
