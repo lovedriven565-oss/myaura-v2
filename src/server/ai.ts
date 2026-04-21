@@ -553,10 +553,9 @@ export class VertexAIProvider implements IGenerationProvider {
     const client = await auth.getClient();
     const accessToken = await client.getAccessToken();
 
-    // v5.0-FIX: imagen-3.0-capability-001 for Subject Customization is ONLY available
-    // in select regions (us-central1, europe-west1 confirmed). europe-west4 returns 401.
-    // We hardcode us-central1 for this model regardless of VERTEX_LOCATION.
-    const IMAGEN3_SUBJECT_LOCATION = process.env.VERTEX_AI_IMAGEN3_LOCATION || 'us-central1';
+    // v5.0-FIX: imagen-3.0-capability-001 for Subject Customization.
+    // Default to global (same as flash model) for consistency; override via env if needed.
+    const IMAGEN3_SUBJECT_LOCATION = process.env.VERTEX_AI_IMAGEN3_LOCATION || 'global';
     const location = IMAGEN3_SUBJECT_LOCATION;
     const url = `https://${location}-aiplatform.googleapis.com/v1/projects/${slot.projectId || VERTEX_ADC_PROJECT}/locations/${location}/publishers/google/models/${IMAGEN_3_CAPABILITY_MODEL}:predict`;
     console.log(`[v5.0-IMAGEN3-SUBJ] Predict URL: ${url}`);
