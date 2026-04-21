@@ -6,7 +6,7 @@ import { PromptType, StyleId } from "./prompts.js";
 // batch time by ~65% (3 parallel workers × 3 min/image ≈ 6 min for 6 images
 // instead of 18 min sequential).
 export const generationQueue = new PQueue({
-  concurrency: parseInt(process.env.GENERATION_QUEUE_CONCURRENCY || "3", 10),
+  concurrency: parseInt(process.env.GENERATION_QUEUE_CONCURRENCY || "1", 10),
   interval: parseInt(process.env.INTER_REQUEST_DELAY_MS || "6000"),
   intervalCap: 1,
 });

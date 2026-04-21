@@ -7,16 +7,16 @@ export interface IGenerationProvider {
 }
 
 // ─── MyAURA Model Stack (Vertex AI) ─────────────────────────────────────────
-// v3.5 GLOBAL-FIX (2026-04-21):
-//   Both preview models (gemini-3-pro-image-preview and
-//   gemini-3.1-flash-image-preview) are only exposed via the Vertex AI
-//   `global` endpoint with apiVersion `v1beta1`. All regional endpoints
-//   (europe-west4/1, us-central1) return 404 NOT_FOUND — verified via
-//   probe on 2026-04-21 against project myaura-production-492012.
-//   No Imagen fallbacks — they were unstable in production (500s +
-//   "fetch failed (other side closed)" crashing the event loop into SIGTERM).
-const FREE_MODEL_PRIMARY = "gemini-3.1-flash-image-preview";
-const PRO_MODEL_PRIMARY  = "gemini-3-pro-image-preview";
+// v4.0 UNIFIED FLASH PIVOT (2026-04-21):
+//   gemini-3-pro-image-preview was producing plastic/CGI faces regardless of
+//   prompt architecture (V10 sentence blocks, V11 tag cascade). It is REMOVED.
+//   Both tiers now route through gemini-3.1-flash-image-preview on the Vertex
+//   AI `global` endpoint with apiVersion `v1beta1`. Regional endpoints
+//   return 404 for preview models — verified 2026-04-21.
+//
+//   Tier differentiation lives in OUTPUT VOLUME, EXCLUSIVE STYLES, REFERENCE
+//   DEPTH, and TEMPERATURE — NOT in model choice.
+const UNIFIED_MODEL = "gemini-3.1-flash-image-preview";
 
 // Retry configuration for resilience against 429 rate limits
 const MAX_RETRIES = 2;
@@ -28,7 +28,6 @@ const MAX_DELAY_MS = 60000;  // cap at 60s
 const MODEL_CALL_TIMEOUT_MS: Record<string, number> = {
   ["gemini-2.5-flash-image"]:          90_000,
   ["gemini-3.1-flash-image-preview"]:  90_000,
-  ["gemini-3-pro-image-preview"]:     120_000,
 };
 const DEFAULT_CALL_TIMEOUT_MS = 90_000;
 
@@ -519,24 +518,16 @@ export class VertexAIProvider implements IGenerationProvider {
     }
     contents.push({ text: prompt });
 
-    // ─── L1 ONLY (tier-based Gemini; no Imagen fallback) ───────────────────
-    // Imagen fallbacks were removed in v3.4 — they were throwing 500s and
-    // "fetch failed (other side closed)" which crashed the event loop and
-    // triggered SIGTERM on Cloud Run. Fail fast instead.
-    const l1Model = mode === 'premium' ? PRO_MODEL_PRIMARY : FREE_MODEL_PRIMARY;
+    // ─── L1 ONLY (unified flash model) ─────────────────────────────────────
+    // v4.0: Both tiers use gemini-3.1-flash-image-preview. Differentiation is
+    // through prompt volume, style exclusivity, reference depth, temperature.
+    const l1Model = UNIFIED_MODEL;
 
-    // Preview models (gemini-3-pro-image-preview, gemini-3.1-flash-image-preview)
-    // REQUIRE v1beta1 and location=global on Vertex AI. Verified via probe
-    // on 2026-04-21 — regional endpoints return 404 for preview models.
-    // Non-preview GA models keep v1 and the configured regional location.
-    const isPreviewModel = l1Model.includes('preview');
-    const envApiVersion = (process.env.VERTEX_AI_API_VERSION || '').trim();
-    const effectiveApiVersion = envApiVersion
-      ? envApiVersion
-      : (isPreviewModel ? 'v1beta1' : (apiVersion || 'v1'));
-    const effectiveLocation = isPreviewModel ? VERTEX_AI_PREVIEW_LOCATION : VERTEX_LOCATION;
+    // Preview models REQUIRE v1beta1 and location=global on Vertex AI.
+    const effectiveApiVersion = 'v1beta1';
+    const effectiveLocation = VERTEX_AI_PREVIEW_LOCATION;
 
-    console.log(`[v3.6-HARDEN] [Tier: ${tier}] L1 → ${l1Model} (${effectiveApiVersion}) | region=${effectiveLocation} | key ...${slot.keyHint}`);
+    console.log(`[v4.0-FLASH-PIVOT] [Tier: ${tier}] L1 → ${l1Model} (${effectiveApiVersion}) | region=${effectiveLocation} | key ...${slot.keyHint}`);
 
     try {
       // v3.6: Wrap in withNetworkRetry to absorb transient Vertex transport
@@ -548,7 +539,7 @@ export class VertexAIProvider implements IGenerationProvider {
         () => this._callModel(slot, l1Model, contents, mode, effectiveLocation, effectiveApiVersion),
         `L1 ${l1Model}@${effectiveLocation}`,
       );
-      console.log(`[v3.6-HARDEN] L1 SUCCESS | model=${l1Model}@${effectiveLocation}`);
+      console.log(`[v4.0-FLASH-PIVOT] L1 SUCCESS | model=${l1Model}@${effectiveLocation}`);
       return result;
     } catch (l1Err: any) {
       const l1Msg = l1Err?.message || "";
@@ -558,8 +549,8 @@ export class VertexAIProvider implements IGenerationProvider {
       if (l1Cls.isBilling) markKey24hCooldown(slot, 'L1 billing disabled');
       else if (l1Cls.is429) markKeyCooldown(slot);
 
-      console.error(`[v3.5-GLOBAL-FIX] L1 ${l1Model} FATAL in ${effectiveLocation} (${l1Msg.slice(0, 200)})`);
-      throw new Error(`[v3.5] Generation failed on ${l1Model}@${effectiveLocation}: ${l1Msg.slice(0, 150)}`);
+      console.error(`[v4.0-FLASH-PIVOT] L1 ${l1Model} FATAL in ${effectiveLocation} (${l1Msg.slice(0, 200)})`);
+      throw new Error(`[v4.0] Generation failed on ${l1Model}@${effectiveLocation}: ${l1Msg.slice(0, 150)}`);
     }
   }
 }
@@ -584,7 +575,7 @@ export class GeminiProvider implements IGenerationProvider {
       }
       contents.push({ text: prompt });
 
-      const modelId = mode === 'premium' ? PRO_MODEL_PRIMARY : FREE_MODEL_PRIMARY;
+      const modelId = UNIFIED_MODEL;
       const response = await this.ai.models.generateContent({
         model: modelId,
         contents,
