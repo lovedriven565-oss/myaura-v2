@@ -1,10 +1,12 @@
 import PQueue from "p-queue";
 import { PromptType, StyleId } from "./prompts.js";
 
-// Global governed queue: strictly sequential, min 6s between task starts.
-// Prevents Thundering Herd / Token Bucket Exhaustion on Vertex AI.
+// Global governed queue: limited concurrency with 6s spacing between starts.
+// Prevents Thundering Herd / Token Bucket Exhaustion on Vertex AI while cutting
+// batch time by ~65% (3 parallel workers × 3 min/image ≈ 6 min for 6 images
+// instead of 18 min sequential).
 export const generationQueue = new PQueue({
-  concurrency: 1,
+  concurrency: parseInt(process.env.GENERATION_QUEUE_CONCURRENCY || "3", 10),
   interval: parseInt(process.env.INTER_REQUEST_DELAY_MS || "6000"),
   intervalCap: 1,
 });
@@ -127,7 +129,10 @@ export function buildStyleScheduleWithCount(config: PackageConfig, styleIds: Sty
 // Per-package generation config — concurrency is now owned by generationQueue.
 // These values are kept for logging/compat only; the queue enforces actual limits.
 export function getGenerationConfig(packageId: PackageId): { concurrency: number; delayMs: number } {
-  return { concurrency: 1, delayMs: parseInt(process.env.INTER_REQUEST_DELAY_MS || "6000") };
+  return {
+    concurrency: parseInt(process.env.GENERATION_QUEUE_CONCURRENCY || "3", 10),
+    delayMs: parseInt(process.env.INTER_REQUEST_DELAY_MS || "6000")
+  };
 }
 
 // Error isolation wrapper: lets the task throw without crashing the queue.

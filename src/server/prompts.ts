@@ -23,23 +23,24 @@ export interface DebugPromptParts {
   index: number;
 }
 
-// ─── V9 "Value Gap" Architecture ─────────────────────────────────────────────
+// ─── V10 "Likeness Lock" Architecture ────────────────────────────────────────
 //
 // Design philosophy:
-//   FREE tier  → Flawless, clean, editorial-grade. Feels polished and complete
-//                on its own. Uses gentle aesthetic keywords that the smaller
-//                model (gemini-2.5-flash-image) can execute reliably without
-//                drifting into plastic/uncanny territory.
+//   Identity is NON-NEGOTIABLE. Both tiers inherit the same forensic likeness
+//   preservation protocol, age-lock anchors, and anti-plasticity clauses.
 //
-//   PREMIUM    → Full optical-physics payload. Forces the heavier model
-//                (gemini-3-pro-image-preview) to leverage its additional
-//                reasoning capacity on lens geometry, micro-skin texture,
-//                catchlight symmetry, and anatomical coherence.
+//   FREE tier  → Clean editorial portrait with mandatory realism tokens.
+//                The smaller model (gemini-3.1-flash-image-preview) receives
+//                enough optical and skin-fidelity anchors to avoid the
+//                infamous "AI wax face" without overwhelming its context.
 //
-// Both tiers share the same identity anchor, framing rotation, and demographic
-// injection — the ONLY thing that changes is the aesthetic suffix and the
-// negative-prompt strictness. This keeps the value gap visible but non-broken:
-// a Free user still gets a usable portrait, a Premium user gets a Vogue cover.
+//   PREMIUM    → Full optical-physics payload + surgical identity enforcement.
+//                gemini-3-pro-image-preview reasons through lens geometry,
+//                micro-skin texture, catchlight asymmetry, and anatomical
+//                coherence under strict "do not beautify" constraints.
+//
+// Value gap lives in optical depth, NOT in identity safety. A Free user gets a
+// believable human; a Premium user gets a believable human shot on a $4k lens.
 
 export const CORE_STYLES: readonly StyleId[] = Object.freeze([
   "business",
@@ -115,12 +116,12 @@ const STYLE_BLOCKS: Record<StyleId, StyleBlock> = {
 };
 
 const VARIETY_FRAMINGS = [
-  "Perfectly centered frontal portrait",
-  "Subtle 3/4 angle portrait",
-  "Medium close-up portrait",
-  "Head-and-shoulders portrait",
-  "Environmental portrait with background depth",
-  "Relaxed posture three-quarter portrait",
+  "Perfectly centered frontal portrait, raw unedited",
+  "Subtle 3/4 angle portrait, raw unedited",
+  "Medium close-up portrait, raw unedited",
+  "Head-and-shoulders portrait, raw unedited",
+  "Environmental portrait with background depth, raw unedited",
+  "Relaxed posture three-quarter portrait, raw unedited",
 ];
 
 // ── Tier-differentiated aesthetic suffixes ───────────────────────────────────
@@ -128,54 +129,63 @@ const VARIETY_FRAMINGS = [
 // PREMIUM_SUFFIX is the optical-physics payload — sensor, lens, grade, grain,
 // catchlights, anatomical anchors. This is what the heavier model rewards.
 const FREE_AESTHETIC_SUFFIX =
-  "Editorial-grade color balance, soft diffused light, natural skin tone, gentle background separation, tasteful composition, clean and polished finish.";
+  "Raw photo, unedited. Shot on 85mm portrait lens, shallow depth of field with natural bokeh. " +
+  "Visible skin pores, natural micro-texture, subtle subsurface scattering on ears and nose. " +
+  "Accurate daylight color science, no digital smoothing, no beauty filter, no AI gloss. " +
+  "Preserve every facial asymmetry, freckle, and natural imperfection exactly as in the reference.";
 
 const PREMIUM_AESTHETIC_SUFFIX = [
   // Optical physics
-  "Shot on Sony A7 IV full-frame sensor, Sony GM 85mm f/1.4 prime lens, shallow depth of field with creamy bokeh roll-off",
-  // Cinematic grade
-  "S-Cinetone color science, subtle teal-shadow / warm-highlight grading, 35mm organic film grain",
-  // Skin realism
-  "hyper-realistic skin micro-texture with visible pores and natural subsurface scattering, no plastic smoothing",
-  // Eye / anatomy anchors
-  "symmetric catchlights, anatomically correct hand articulation, anatomical knuckle definition, preserved iris pattern detail",
-  // Editorial polish
-  "Vogue-tier composition, commercial-grade retouch, gallery-print sharpness",
-].join(". ") + ".";
+  "Raw unedited photo. Shot on Sony A7 IV full-frame sensor, Sony GM 85mm f/1.4 prime lens at f/2.0, shallow depth of field with creamy natural bokeh roll-off",
+  // Color science
+  "Neutral daylight color science, accurate skin tone reproduction without warmth injection, subtle 35mm organic film grain",
+  // Skin realism — surgical
+  "Hyper-realistic skin micro-texture: visible pores, fine vellus hair, natural sebum sheen on T-zone, subsurface scattering on ears/nose/cheeks, absolutely no plastic smoothing or pore erasure",
+  // Eye / anatomy anchors — likeness-critical
+  "Asymmetric catchlights matching ambient source, preserved iris pattern detail and limbal ring thickness, correct sclera vascularity, anatomically correct hand articulation and knuckle definition",
+  // Anti-beauty mandate
+  "NO digital retouching of any kind: no frequency separation, no dodge/burn, no skin smoothing, no teeth whitening, no eye brightening, no jawline sharpening, no cheekbone enhancement, no lip plumping",
+  // Editorial frame
+  "Vogue-tier composition with commercial-grade RAW fidelity, gallery-print micro-contrast",
+].join(". ") + ";";
 
 // ── Negative prompts: tier-aware strictness ──────────────────────────────────
 const BASE_NEGATIVE =
-  "different person, altered facial features, changed eye color, distorted anatomy, extra fingers, malformed hands, text artifacts, watermarks";
+  "different person, altered facial features, changed eye color, distorted anatomy, extra fingers, malformed hands, text artifacts, watermarks, symmetry correction, skin smoothing, pore erasure, baby face filter, age regression, age advancement, plastic skin, wax complexion, CGI sheen";
 
 const PREMIUM_NEGATIVE_ANCHORS =
-  ", plastic skin, wax-like complexion, airbrushed artifacts, uncanny AI-look, over-retouched porcelain, CGI sheen, 3D render tells, smeared irises, rubber-band jawline, cartoon proportions";
+  ", over-retouched porcelain, uncanny AI gloss, digital makeup, beauty filter, teeth whitening, eye enlargement, lip plumping, cheekbone enhancement, jawline sharpening, rubber-band jawline, smeared irises, cartoon proportions, 3D render tells, synthetic hair, blurred pores, porcelain doll effect, Instagram filter, Snapchat filter, frequency separation, dodge and burn";
 
 // ── Identity core (shared) ───────────────────────────────────────────────────
 const IDENTITY_CORE =
-  "A photorealistic portrait of the same person shown in the reference photos. " +
-  "CRITICAL: Maintain strict physical likeness to the references. Preserve the exact " +
-  "facial structure, eye shape, natural eye color, nose, jawline, skin tone, and overall " +
-  "recognizability. Do not alter, beautify, idealize, or reinterpret the subject's identity.";
+  "A raw unretouched photorealistic portrait of the EXACT same individual shown in every reference photo. " +
+  "IDENTITY PRESERVATION PROTOCOL — MANDATORY: " +
+  "(1) Reproduce the identical facial bone structure, eye socket shape, brow ridge contour, nose bridge width and tip geometry, lip fullness and Cupid's bow, jawline angle, chin projection, and ear shape. " +
+  "(2) Preserve natural asymmetries: do NOT correct eye size differences, eyebrow height variance, nose deviation, or jaw asymmetry. " +
+  "(3) Skin fidelity: reproduce exact pore density, natural sebum sheen, stubble pattern, acne, freckles, moles, scar tissue, under-eye hollows, and nasolabial fold depth. " +
+  "(4) Eye fidelity: preserve exact iris color, pattern, and limbal ring thickness; maintain correct sclera vascularity and catchlight geometry. " +
+  "(5) Forbidden transforms: NO symmetry correction, NO skin smoothing, NO pore erasure, NO eye enlargement, NO jawline sharpening, NO lip plumping, NO cheekbone enhancement, NO digital makeup, NO teeth whitening, NO wrinkle removal. " +
+  "The subject must be immediately recognizable as the same person by a third party who knows them.";
 
 function describeDemographics(gender: Gender, ageTier: AgeTier): string {
-  const ageHint =
+  const ageLock =
     ageTier === "young"
-      ? "the subject appears 20–30 years old, fresh youthful skin"
+      ? "AGE LOCK 24–26: subject must appear exactly mid-twenties. Preserve youthful skin texture but DO NOT infantilize. Retain adult facial proportions, cheekbone height, and jaw width. Forbidden: baby-face filter, cheek puffing, oversized eyes, reduced nose bridge, lip plumping."
       : ageTier === "mature"
-      ? "the subject appears 30–45 years old, refined adult features with natural skin character"
-      : "the subject appears 45+ years old, distinguished features with natural aging traits — subtle fine lines, mature skin texture preserved";
+      ? "AGE LOCK 35–38: subject must appear exactly mid-thirties. Preserve early expression lines, natural forehead texture, slight crow's feet, and mature skin density. Forbidden: youth filter, wrinkle erasure, skin tightening, glow enhancement, eye bag removal."
+      : "AGE LOCK 48–52: subject must appear exactly late-forties. Preserve distinguished graying temples, natural forehead lines, crow's feet, nasolabial folds, slight jowl definition, and mature skin laxity. Forbidden: age regression, gray hair removal, wrinkle flattening, skin lifting, brightness injection.";
 
   const genderHint =
     gender === "male"
-      ? "masculine presentation consistent with the references"
+      ? "Masculine presentation: preserve Adam's apple visibility, brow bossing, facial hair density, and masculine skin texture without exaggeration."
       : gender === "female"
-      ? "feminine presentation consistent with the references"
-      : "gender presentation faithfully mirrored from the references";
+      ? "Feminine presentation: preserve lip vermillion definition, lash density, and feminine bone structure without artificial enhancement."
+      : "Gender presentation faithfully mirrored from references without stereotyping or exaggeration.";
 
-  return `Demographics: ${ageHint}; ${genderHint}.`;
+  return `Demographics: ${ageLock} ${genderHint}`;
 }
 
-function buildV9Prompt(
+function buildV10Prompt(
   gender: Gender,
   styleId: StyleId,
   ageTier: AgeTier,
@@ -186,14 +196,14 @@ function buildV9Prompt(
   const framing = VARIETY_FRAMINGS[index % VARIETY_FRAMINGS.length];
   const demographics = describeDemographics(gender, ageTier);
 
-  // Composition layer — shared across tiers
+  // Composition layer — shared across tiers, identity is non-negotiable
   const composition =
     `${IDENTITY_CORE} ${demographics} Framing: ${framing}. ` +
     `Subject: ${styleBlock.subject}. ` +
     `Environment: ${styleBlock.environment}. ` +
     `Mood: ${styleBlock.mood}. `;
 
-  // Aesthetic layer — differentiates Free vs Premium
+  // Aesthetic layer — differentiates Free vs Premium in optical depth only
   const aesthetic = mode === "premium" ? PREMIUM_AESTHETIC_SUFFIX : FREE_AESTHETIC_SUFFIX;
 
   return composition + aesthetic;
@@ -210,11 +220,11 @@ export function buildPromptProfile(
   ageTier: AgeTier = "young",
   gender: Gender = "unset",
 ): { positivePrompt: string; negativePrompt: string; debugPromptParts: DebugPromptParts } {
-  const positivePrompt = buildV9Prompt(gender, styleId, ageTier, mode, index);
+  const positivePrompt = buildV10Prompt(gender, styleId, ageTier, mode, index);
   const negativePrompt = buildNegativePrompt(mode);
 
   const debugPromptParts: DebugPromptParts = {
-    version: "V9-ValueGap",
+    version: "V10-LikenessLock",
     styleId,
     mode,
     gender,
@@ -223,7 +233,7 @@ export function buildPromptProfile(
   };
 
   console.log(
-    `[PROMPT V9-ValueGap] style=${styleId} mode=${mode} gender=${gender} age=${ageTier} idx=${index}`,
+    `[PROMPT V10-LikenessLock] style=${styleId} mode=${mode} gender=${gender} age=${ageTier} idx=${index}`,
   );
   return { positivePrompt, negativePrompt, debugPromptParts };
 }

@@ -301,26 +301,44 @@ function createEphemeralClient(slot: KeySlot, signal: AbortSignal, locationOverr
 const keyPool: KeySlot[] = buildKeyPool();
 let keyIndex = 0;
 
+// Concurrency-safe key-selection lock. p-queue may run >1 task in parallel,
+// so we must serialise slot picking to prevent two workers grabbing the
+// same keyIndex and hammering the same GCP project / quota bucket.
+let _keySelectPromise: Promise<void> = Promise.resolve();
+
+function acquireKeyLock(): Promise<() => void> {
+  let release: () => void;
+  const p = new Promise<void>(resolve => { release = resolve; });
+  const prev = _keySelectPromise;
+  _keySelectPromise = prev.then(() => p);
+  return prev.then(() => release);
+}
+
 async function getNextClient(): Promise<KeySlot> {
-  const now = Date.now();
-  const total = keyPool.length;
+  const unlock = await acquireKeyLock();
+  try {
+    const now = Date.now();
+    const total = keyPool.length;
 
-  for (let i = 0; i < total; i++) {
-    const slot = keyPool[(keyIndex + i) % total];
-    if (slot.cooldownUntil <= now) {
-      keyIndex = ((keyIndex + i) + 1) % total;
-      return slot;
+    for (let i = 0; i < total; i++) {
+      const slot = keyPool[(keyIndex + i) % total];
+      if (slot.cooldownUntil <= now) {
+        keyIndex = ((keyIndex + i) + 1) % total;
+        return slot;
+      }
     }
-  }
 
-  // All keys in cooldown — wait for the earliest to become ready
-  const earliest = keyPool.reduce((a, b) => a.cooldownUntil < b.cooldownUntil ? a : b);
-  const waitMs = earliest.cooldownUntil - now;
-  const waitSec = Math.ceil(waitMs / 1000);
-  console.warn(`[KeyPool] All ${total} key(s) cooling. Waiting ${waitSec}s for key ...${earliest.keyHint}`);
-  await new Promise(resolve => setTimeout(resolve, waitMs));
-  keyIndex = (keyPool.findIndex(s => s === earliest) + 1) % total;
-  return earliest;
+    // All keys in cooldown — wait for the earliest to become ready
+    const earliest = keyPool.reduce((a, b) => a.cooldownUntil < b.cooldownUntil ? a : b);
+    const waitMs = earliest.cooldownUntil - now;
+    const waitSec = Math.ceil(waitMs / 1000);
+    console.warn(`[KeyPool] All ${total} key(s) cooling. Waiting ${waitSec}s for key ...${earliest.keyHint}`);
+    await new Promise(resolve => setTimeout(resolve, waitMs));
+    keyIndex = (keyPool.findIndex(s => s === earliest) + 1) % total;
+    return earliest;
+  } finally {
+    unlock();
+  }
 }
 
 function markKeyCooldown(slot: KeySlot): void {
