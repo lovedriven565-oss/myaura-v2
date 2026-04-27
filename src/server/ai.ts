@@ -517,8 +517,9 @@ export class VertexAIProvider implements IGenerationProvider {
     try {
       const { prompt, subjectDescription } = buildPremiumImagenPrompt(styleId, index, profile);
 
-      // Take the first 4 refs (audit ranks them by quality).
-      const usableRefs = refs.slice(0, 4);
+      // Imagen 3 Subject Customization allows max 2 refs for non-square
+      // aspect ratios (e.g. 3:4, 9:16). Audit already ranked refs by quality.
+      const usableRefs = refs.slice(0, 2);
 
       const referenceImages = usableRefs.map((r, i) => ({
         referenceType: "REFERENCE_TYPE_SUBJECT",
