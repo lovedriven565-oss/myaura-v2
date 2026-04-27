@@ -372,62 +372,38 @@ function safe(s: string): string {
 }
 
 /**
- * The headline Imagen `subjectDescription`. This is THE LEVER for likeness
- * fidelity in Subject Customization: the cross-attention module ties the
- * identity tokens to the face latents through this prose. Make it specific.
+ * Neutral subject identifier (V7.1 latent-space-conflict fix).
+ *
+ * Earlier versions injected dense biometric prose ("medium skin, short brown
+ * hair, brown eyes, sharp jawline, ...") to anchor identity. Empirically that
+ * over-weights the text encoder, drowns out the visual reference embedding,
+ * and pulls outputs toward training-set means. We now starve the text encoder
+ * of facial detail and let the reference images do the work.
+ *
+ * Signature is preserved so existing callers continue to compile.
  */
 export function buildSubjectDescription(
-  profile: SubjectProfile,
-  isPrimary: boolean,
-  viewIndex: number,
+  _profile: SubjectProfile,
+  _isPrimary: boolean,
+  _viewIndex: number,
 ): string {
-  const age = AGE_DESCRIPTOR[profile.ageTier];
-  const gender = GENDER_DESCRIPTOR[profile.gender];
-  const skin = `${profile.skinTone} skin`;
-  const hair =
-    profile.hairLength === "bald" || profile.hairColor === "bald"
-      ? "shaved or bald head"
-      : `${profile.hairLength} ${profile.hairColor.replace("-", " ")} hair`;
-  const eyes = `${profile.eyeColor} eyes`;
-  const facial = profile.facialHair === "none" ? "clean-shaven" : profile.facialHair.replace("-", " ");
-  const features = profile.distinguishingFeatures.length
-    ? `, distinctive features: ${profile.distinguishingFeatures.map(safe).filter(Boolean).join(", ")}`
-    : "";
-
-  const role = isPrimary
-    ? "Primary identity reference."
-    : `Additional reference of the same individual (view ${viewIndex + 1}).`;
-
-  return (
-    `${role} A real photograph of a ${age} ${gender} with ${skin}, ${hair}, ${eyes}, ${facial}${features}. ` +
-    `This is the same single individual as in every other reference image. ` +
-    `Preserve the exact facial geometry, bone structure, proportions, and skin texture from this photograph.`
-  );
+  return "A specific individual. The exact person shown in the reference images.";
 }
 
 /**
- * Identity-anchor header injected at the front of every generation prompt
- * (both Imagen instances[0].prompt and Flash text part). Reinforces what the
- * subjectDescription says, in the language the GENERATION pass attends to.
+ * Neutral identity header injected at the front of every generation prompt
+ * (V7.1 latent-space-conflict fix).
+ *
+ * Detailed semantic descriptors of facial features were over-weighting the
+ * text encoder relative to the visual reference embedding, so the model
+ * gravitated toward an idealized text-conditioned mean instead of the actual
+ * uploaded face. We now emit a single neutral identifier — the visual refs
+ * carry the identity, not the prose.
+ *
+ * Signature is preserved so existing callers continue to compile.
  */
-export function buildIdentityHeader(profile: SubjectProfile): string {
-  const age = AGE_DESCRIPTOR[profile.ageTier];
-  const gender = GENDER_DESCRIPTOR[profile.gender];
-  const skin = profile.skinTone;
-  const hair =
-    profile.hairLength === "bald" || profile.hairColor === "bald"
-      ? "bald"
-      : `${profile.hairLength} ${profile.hairColor.replace("-", " ")} hair`;
-  const eyes = `${profile.eyeColor} eyes`;
-  const facial = profile.facialHair === "none" ? "" : `, ${profile.facialHair.replace("-", " ")}`;
-  const features = profile.distinguishingFeatures.length
-    ? ` Identity markers: ${profile.distinguishingFeatures.map(safe).filter(Boolean).slice(0, 3).join(", ")}.`
-    : "";
-  return (
-    `The subject is the SAME ${age} ${gender} from the reference photos: ` +
-    `${skin} skin, ${hair}, ${eyes}${facial}.${features} ` +
-    `Match this identity exactly — do not generalize, do not idealize, do not change age or ethnicity.`
-  );
+export function buildIdentityHeader(_profile: SubjectProfile): string {
+  return "A specific individual. The exact person shown in the reference images.";
 }
 
 /** A safe fallback profile for edge-cases where audit fails but we still want

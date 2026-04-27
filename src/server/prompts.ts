@@ -62,14 +62,16 @@ export const NEGATIVE_PROMPT =
   "caricature, exaggerated features, idealized features, distorted face, deformed face, " +
   "asymmetric eyes, extra fingers, fused fingers, extra limbs, masterpiece, artstation";
 
-// ─── V7.0 Photographic anchor (the absolute frame) ─────────────────────────
-// Sets the frame to PHOTOGRAPHY before any style-specific words can drag the
-// model into illustration territory. Concrete camera/lens specs work better
-// than buzzwords ("masterpiece" is now in the negative prompt).
+// ─── V7.1 Photographic anchor (latent-space-conflict fix) ──────────────────
+// Concrete optical-physics terms ("85mm lens at f/1.8, full-frame DSLR") were
+// pulling outputs into the "idealized fashion model" attractor basin: glossy
+// skin, perfect symmetry, magazine-grade subjects that no longer matched the
+// uploaded person. We now anchor on candid, unedited, amateur photography
+// language to shift the latent space toward authentic realism.
 const GLOBAL_PHOTO_ANCHOR =
-  "Real photograph, captured on a full-frame DSLR, 85mm lens at f/1.8, " +
-  "natural skin texture with visible pores and micro-imperfections, no retouching, " +
-  "believable photographic depth-of-field, true-to-life color science. The subject is in a ";
+  "An unedited, candid photograph taken on a standard camera. " +
+  "Natural, everyday lighting. Authentic, unretouched amateur photography. " +
+  "The subject is in a ";
 
 // ─── Style blocks ──────────────────────────────────────────────────────────
 interface StyleBlock {
