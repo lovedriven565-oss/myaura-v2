@@ -15,7 +15,7 @@
 // ═════════════════════════════════════════════════════════════════════════════
 
 import type { SubjectProfile } from "./biometric.js";
-import { buildIdentityHeader } from "./biometric.js";
+import { buildIdentityHeader, buildSubjectDescription } from "./biometric.js";
 
 export type PromptTier = "free" | "premium";
 
@@ -217,6 +217,48 @@ export function buildPrompt(
   return tier === "premium"
     ? buildPremiumPrompt(styleId, index, profile)
     : buildFreePrompt(styleId, index, profile);
+}
+
+// ─── PREMIUM tier (Imagen 3 Subject Customization, V8.0) ───────────────────
+/**
+ * Builds the prompt template required by Imagen 3 Subject Customization.
+ *
+ * Imagen 3 expects the prompt to contain `[$referenceId]` markers that the
+ * cross-attention layer replaces with the subject identity at inference
+ * time. Convention: the noun phrase from `subjectDescription` is followed
+ * by `[1]`, e.g. `"a portrait of the mature man [1] in a business suit"`.
+ *
+ * Unlike Gemini, Imagen 3 does NOT support a `negativePrompt` inside the
+ * main prompt string — it is a top-level field on EditImageConfig. So this
+ * function returns ONLY the positive prompt; the negative prompt must be
+ * passed as `config.negativePrompt` by the caller.
+ *
+ * Returns `{ prompt, subjectDescription }` so the caller can wire both
+ * into the `editImage()` call: prompt → top-level, subjectDescription →
+ * SubjectReferenceImage.config.subjectDescription.
+ */
+export function buildPremiumImagenPrompt(
+  styleId: StyleId,
+  index: number,
+  profile: SubjectProfile,
+): { prompt: string; subjectDescription: string } {
+  const block = STYLE_BLOCKS[styleId] || STYLE_BLOCKS.business;
+  const framing = FRAMINGS[index % FRAMINGS.length];
+  const subjectDescription = buildSubjectDescription(profile, true, index);
+
+  // The [1] marker MUST appear immediately after the subjectDescription noun
+  // phrase. Imagen replaces "${subjectDescription} [1]" with the locked
+  // identity at attention time. Any drift in this contract degrades likeness.
+  const subjectToken = `${subjectDescription} [1]`;
+
+  const prompt =
+    `An unedited, candid photograph of ${subjectToken} in a ${block.label}. ` +
+    `${framing}. ${block.subject}. ${block.environment}. ${block.mood}. ` +
+    `Natural everyday lighting. Authentic, unretouched amateur photography. ` +
+    `Real photographic skin texture with visible natural pores and micro-imperfections. ` +
+    `Preserve the exact face, bone structure, and proportions of ${subjectDescription} from the reference photos.`;
+
+  return { prompt, subjectDescription };
 }
 
 export function getAvailableStyles(tier: PromptTier): readonly StyleId[] {

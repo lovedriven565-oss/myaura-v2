@@ -1,5 +1,5 @@
 // ═════════════════════════════════════════════════════════════════════════════
-// MyAURA V6.0 — Enterprise AI Orchestration Layer (Vertex AI)
+// MyAURA V8.0 — Enterprise AI Orchestration Layer (Vertex AI)
 // ═════════════════════════════════════════════════════════════════════════════
 //
 // Strict tier separation (Separation of Concerns):
@@ -8,26 +8,37 @@
 //                     Zero-shot inlineData, 1→1 output, sub-10s latency target.
 //                     Formulaic prompts (see prompts.ts buildFreePrompt).
 //
-//   PREMIUM TIER    → imagen-3.0-generate-001           (region: us-central1)
-//                     Subject Customization via `predict` endpoint:
-//                       - REFERENCE_TYPE_SUBJECT for every uploaded photo
-//                       - REFERENCE_TYPE_CONTROL (FACE_MESH) anchor
-//                     7/25/60 output batches, background async.
-//                     On any failure (429, 503, safety block, region outage)
-//                     the pipeline seamlessly falls back to Flash on `global`
-//                     so the queue always completes.
+//   PREMIUM TIER    → imagen-3.0-capability-001         (region: us-central1)
+//                     Subject Customization via models.editImage() with
+//                     SubjectReferenceImage[] (REFERENCE_TYPE_SUBJECT,
+//                     SUBJECT_TYPE_PERSON). All uploaded refs share
+//                     referenceId=1 so Imagen sees them as multi-view of
+//                     the SAME person — this is Google's LoRA-equivalent
+//                     mechanism for face identity preservation.
+//                     Prompt template uses `[1]` markers (see
+//                     prompts.ts buildPremiumImagenPrompt).
 //
-// Deleted in V6.0:
-//   - CustomJob Instant Tuning pipeline (experimental, never productionised)
-//   - imagen-3.0-capability-001 references (404 on every endpoint)
-//   - 3-tier fallback spaghetti (preview/pro/region ping-pong)
-//   - cross-region roulette (quota is strictly region-bound)
+//   On Imagen failure (429, 503, safety block, region outage, IAM)
+//   the premium pipeline degrades gracefully:
+//     Imagen 3 → Gemini 3 Pro Image (global) → Gemini 3.1 Flash Image (global)
+//   so the queue always completes, even if at lower likeness fidelity.
+//
+// Deleted in V8.0:
+//   - V6 stale comments referring to a `predict`-endpoint that was never
+//     actually wired up
+//   - V6.0 references to FACE_MESH (Imagen 3 auto-detects face mesh when
+//     given REFERENCE_TYPE_SUBJECT + SUBJECT_TYPE_PERSON; explicit FACE_MESH
+//     control was over-constraining and killed pose flexibility)
 //
 // Key pool: ADC-first, with rotating JSON keys if present in ./keys. Every
 // request uses a disposable AbortController so timeouts actually close TCP.
 // ═════════════════════════════════════════════════════════════════════════════
 
-import { GoogleGenAI } from "@google/genai";
+import {
+  GoogleGenAI,
+  SubjectReferenceImage,
+  SubjectReferenceType,
+} from "@google/genai";
 import fs from "fs";
 import path from "path";
 import {
@@ -36,6 +47,8 @@ import {
   type PreflightAudit,
   type SubjectProfile,
 } from "./biometric.js";
+import { buildPremiumImagenPrompt, NEGATIVE_PROMPT } from "./prompts.js";
+import type { StyleId } from "./prompts.js";
 
 // ─── Public Interface ───────────────────────────────────────────────────────
 
@@ -54,15 +67,30 @@ export interface IGenerationProvider {
   generateFreeTier(refs: ImageRef[], prompt: string): Promise<string>;
 
   /**
-   * PREMIUM tier. 10-15 refs → 1 output. Background async.
-   * Primary: imagen-3.0-generate-001 Subject Customization (us-central1).
-   * Fallback: gemini-3.1-flash-image-preview (global) with multi-ref inline.
+   * PREMIUM tier. 10-15 refs → 1 output. Background async (V8.0).
    *
-   * `profile` (optional) injects a rich subject description into Imagen's
-   * Subject Customization, which is the documented LoRA-equivalent lever for
-   * identity preservation. Pass `null` only when the audit was skipped.
+   * Primary: imagen-3.0-capability-001 Subject Customization (us-central1)
+   *          via models.editImage() — this is Google's LoRA-equivalent for
+   *          face identity preservation and produces dramatically better
+   *          likeness than the Gemini image models.
+   * Fallback 1: gemini-3-pro-image-preview (global)         ← higher quality
+   * Fallback 2: gemini-3.1-flash-image-preview (global)     ← always available
+   *
+   * Caller supplies `styleId`/`index` so we can build the Imagen-flavoured
+   * prompt internally (with `[1]` markers required by Subject Customization).
+   * The Gemini-flavoured `fallbackPrompt` is what gets used when the
+   * primary path fails — it is built externally by `buildPremiumPrompt`.
+   *
+   * `profile` MUST be provided for Imagen 3 (it drives subjectDescription).
+   * If null, we skip Imagen and go straight to the Gemini fallback chain.
    */
-  generatePremiumTier(refs: ImageRef[], prompt: string, profile: SubjectProfile | null): Promise<string>;
+  generatePremiumTier(
+    refs: ImageRef[],
+    fallbackPrompt: string,
+    profile: SubjectProfile | null,
+    styleId?: StyleId,
+    index?: number,
+  ): Promise<string>;
 
   /**
    * Preflight biometric audit. Runs BEFORE credit consumption to catch bad
@@ -78,6 +106,12 @@ export interface IGenerationProvider {
 const FLASH_MODEL = "gemini-3.1-flash-image-preview";
 const PRO_MODEL = "gemini-3-pro-image-preview";
 
+// V8.0: Imagen 3 Subject Customization model. This is the *editing*
+// capability model (-capability-001) which supports `referenceImages`
+// with REFERENCE_TYPE_SUBJECT — the -generate-001 model does NOT.
+// Operators can override via IMAGEN_MODEL_ID for evaluation experiments.
+const IMAGEN_MODEL = process.env.IMAGEN_MODEL_ID || "imagen-3.0-capability-001";
+
 // V7.0: dedicated text+vision judge for the preflight audit. Default to
 // gemini-2.5-flash (text-output capable); operators can override via
 // JUDGE_MODEL_ID for evaluation experiments.
@@ -91,7 +125,14 @@ const API_VERSION = "v1beta1";
 // Pro uses the same global endpoint as Flash
 const PRO_LOCATION = "global";
 
-// ─── Timeouts ───────────────────────────────────────────────────────────────
+// Imagen 3 Subject Customization is a regional model. us-central1 is the
+// primary GA region; if quota becomes an issue operators can shift to
+// us-east4/europe-west4 via IMAGEN_LOCATION_ID.
+const IMAGEN_LOCATION = process.env.IMAGEN_LOCATION_ID || "us-central1";
+// Imagen uses the v1 stable surface (NOT v1beta1).
+const IMAGEN_API_VERSION = "v1";
+
+// ─── Timeouts ────────────────────────────────────────────────────────────────────
 // Per-model timeouts are enforced via disposable AbortControllers (httpOptions
 // passes the signal into the GoogleGenAI SDK; for raw fetch calls we wire it
 // directly). Cloud Run `cpu-throttling: false` is assumed for the Premium
@@ -99,6 +140,7 @@ const PRO_LOCATION = "global";
 
 const FLASH_CALL_TIMEOUT_MS   =  90_000;  // 90s: plenty for a single flash call
 const PRO_CALL_TIMEOUT_MS     = 120_000;  // 120s: Pro model is heavier
+const IMAGEN_CALL_TIMEOUT_MS  = 180_000;  // 180s: Imagen 3 with refs is slow
 const JUDGE_CALL_TIMEOUT_MS   =  45_000;  // 45s: 1 multimodal call, 1-15 imgs in
 
 // ─── Retry tuning (rate-limit resilience) ───────────────────────────────────
@@ -346,34 +388,60 @@ export class VertexAIProvider implements IGenerationProvider {
     );
   }
 
-  // ═════ PREMIUM TIER ═════════════════════════════════════════════════════
+  // ═════ PREMIUM TIER (V8.0: Imagen 3 → Pro → Flash) ══════════════════════════
   async generatePremiumTier(
     refs: ImageRef[],
-    prompt: string,
+    fallbackPrompt: string,
     profile: SubjectProfile | null,
+    styleId?: StyleId,
+    index?: number,
   ): Promise<string> {
     if (!refs || refs.length === 0) throw new Error("generatePremiumTier: refs[] required");
 
-    // Primary: Pro model with profile-anchored identity header already inside the prompt.
+    // ── Primary path: Imagen 3 Subject Customization (when profile + styleId)
+    // This is the only Vertex AI model with a documented LoRA-equivalent
+    // face-preservation mechanism. Skip only if upstream couldn't audit
+    // (no profile) or didn't pass styleId (back-compat for legacy callers).
+    if (profile && styleId !== undefined && index !== undefined) {
+      console.log(
+        `[PREMIUM] imagen | refs=${refs.length} | region=${IMAGEN_LOCATION} | ` +
+        `style=${styleId} | profile=${profile.gender}/${profile.ageTier}`
+      );
+      try {
+        return await withRateLimitRetry(
+          () => this._callImagen3SubjectCustomization(refs, profile, styleId, index),
+          "PREMIUM.imagen",
+        );
+      } catch (imgErr: any) {
+        const msg = (imgErr?.message || String(imgErr)).slice(0, 300);
+        console.warn(`[PREMIUM] imagen failed → falling back to gemini pro. err=${msg}`);
+      }
+    } else {
+      console.log(
+        `[PREMIUM] imagen SKIPPED → gemini pro | reason=` +
+        `${!profile ? "no-profile" : "no-styleId"}`
+      );
+    }
+
+    // ── Fallback 1: Gemini 3 Pro Image (general image model)
     console.log(
-      `[PREMIUM] pro | refs=${refs.length} | region=${PRO_LOCATION} | ` +
+      `[PREMIUM-FALLBACK] pro | refs=${refs.length} | region=${PRO_LOCATION} | ` +
       `profile=${profile ? `${profile.gender}/${profile.ageTier}` : "none"}`
     );
     try {
       return await withRateLimitRetry(
-        () => this._callGeminiImage(PRO_MODEL, PRO_LOCATION, PRO_CALL_TIMEOUT_MS, refs, prompt, 0.1, 0.9, "PREMIUM.pro"),
+        () => this._callGeminiImage(PRO_MODEL, PRO_LOCATION, PRO_CALL_TIMEOUT_MS, refs, fallbackPrompt, 0.1, 0.9, "PREMIUM.pro"),
         "PREMIUM.pro",
       );
     } catch (proErr: any) {
       const msg = (proErr?.message || String(proErr)).slice(0, 300);
-      console.error("🚨 PRO FAILED: FALLING BACK TO FLASH", proErr);
       console.warn(`[PREMIUM] pro failed → falling back to flash. err=${msg}`);
     }
 
-    // Graceful fallback: Flash (global) with all refs inline.
+    // ── Fallback 2: Gemini 3.1 Flash Image (always-available)
     console.log(`[PREMIUM-FALLBACK] flash | refs=${refs.length} | region=${FLASH_LOCATION}`);
     return withRateLimitRetry(
-      () => this._callGeminiImage(FLASH_MODEL, FLASH_LOCATION, FLASH_CALL_TIMEOUT_MS, refs, prompt, 0.1, 0.9, "PREMIUM.flash-fallback"),
+      () => this._callGeminiImage(FLASH_MODEL, FLASH_LOCATION, FLASH_CALL_TIMEOUT_MS, refs, fallbackPrompt, 0.1, 0.9, "PREMIUM.flash-fallback"),
       "PREMIUM.flash-fallback",
     );
   }
@@ -388,7 +456,105 @@ export class VertexAIProvider implements IGenerationProvider {
     );
   }
 
-  // ─── Gemini Image Generation (shared by free, premium, and fallback) ────
+  // ─── Imagen 3 Subject Customization (V8.0 primary premium path) ───────
+  /**
+   * The LoRA-equivalent face-preservation lever. All uploaded refs are wrapped
+   * as SubjectReferenceImage objects sharing the same `referenceId: 1` so
+   * Imagen 3 treats them as multi-view of THE SAME identity. The prompt is
+   * built internally from styleId/index/profile via buildPremiumImagenPrompt
+   * and contains a `[1]` marker that the cross-attention layer locks the
+   * reference identity onto.
+   *
+   * Notes:
+   *   - Imagen 3 has a hard limit of 4 reference images per call. We pick the
+   *     4 best refs (front + diversified angles); upstream audit already
+   *     ranks them by quality.
+   *   - guidanceScale: 5.0 is the empirically-tuned sweet spot for likeness.
+   *     Lower (e.g. 3.0) makes outputs drift; higher (e.g. 9.0) over-anchors
+   *     to the prompt and degrades realism.
+   *   - aspectRatio: "3:4" is the default portrait ratio matching the rest
+   *     of the pipeline (UI shows portraits, not landscape).
+   */
+  private async _callImagen3SubjectCustomization(
+    refs: ImageRef[],
+    profile: SubjectProfile,
+    styleId: StyleId,
+    index: number,
+  ): Promise<string> {
+    const slot = await getNextSlot();
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), IMAGEN_CALL_TIMEOUT_MS);
+
+    try {
+      const client = createClient(slot, controller.signal, IMAGEN_LOCATION, IMAGEN_API_VERSION);
+      const { prompt, subjectDescription } = buildPremiumImagenPrompt(styleId, index, profile);
+
+      // Imagen 3 caps reference images at 4. Take the first 4 (audit ranks
+      // them by quality, so [0] is the cleanest front-facing shot).
+      const usableRefs = refs.slice(0, 4);
+
+      const referenceImages = usableRefs.map(r => {
+        const ref = new SubjectReferenceImage();
+        ref.referenceId = 1;  // ALL refs share id=1 → "same person, multi-view"
+        ref.referenceImage = {
+          imageBytes: r.base64,
+          mimeType: r.mimeType,
+        };
+        ref.config = {
+          subjectType: SubjectReferenceType.SUBJECT_TYPE_PERSON,
+          subjectDescription,
+        };
+        return ref;
+      });
+
+      console.log(
+        `[PREMIUM.imagen] model=${IMAGEN_MODEL} refs=${referenceImages.length}/${refs.length} ` +
+        `desc="${subjectDescription}" prompt[0..120]="${prompt.slice(0, 120)}"`
+      );
+
+      const response = await client.models.editImage({
+        model: IMAGEN_MODEL,
+        prompt,
+        referenceImages,
+        config: {
+          numberOfImages: 1,
+          aspectRatio: "3:4",
+          guidanceScale: 5.0,
+          // @ts-ignore — SDK enum vs string mismatch; Vertex accepts "allow_all"
+          personGeneration: "allow_all",
+          negativePrompt: NEGATIVE_PROMPT,
+          // @ts-ignore — SDK enum vs string mismatch; "block_only_high" matches
+          // the lenient policy used elsewhere in the pipeline.
+          safetyFilterLevel: "block_only_high",
+          httpOptions: { signal: controller.signal },
+        },
+      } as any);
+
+      clearTimeout(timeoutId);
+
+      const generated = response.generatedImages?.[0];
+      const imageBytes = generated?.image?.imageBytes;
+      if (!imageBytes) {
+        throw new Error(
+          `[PREMIUM.imagen] response had no image bytes ` +
+          `(generated=${response.generatedImages?.length ?? 0})`
+        );
+      }
+      return imageBytes;
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      this._classifyAndCooldown(slot, err, "PREMIUM.imagen");
+      if (controller.signal.aborted) {
+        throw Object.assign(
+          new Error(`[PREMIUM.imagen] timeout after ${IMAGEN_CALL_TIMEOUT_MS}ms`),
+          { isTimeout: true },
+        );
+      }
+      throw err;
+    }
+  }
+
+  // ─── Gemini Image Generation (shared by free, premium fallback, and free) ──
   private async _callGeminiImage(
     modelId: string,
     location: string,

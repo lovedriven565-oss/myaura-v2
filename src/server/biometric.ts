@@ -372,22 +372,35 @@ function safe(s: string): string {
 }
 
 /**
- * Neutral subject identifier (V7.1 latent-space-conflict fix).
+ * Imagen 3 Subject Customization `subjectDescription` (V8.0).
  *
- * Earlier versions injected dense biometric prose ("medium skin, short brown
- * hair, brown eyes, sharp jawline, ...") to anchor identity. Empirically that
- * over-weights the text encoder, drowns out the visual reference embedding,
- * and pulls outputs toward training-set means. We now starve the text encoder
- * of facial detail and let the reference images do the work.
+ * In Imagen 3 the prompt is templated with `[1]` markers and the
+ * `subjectDescription` is the SHORT noun phrase that replaces those markers
+ * when the cross-attention layer locks identity onto the reference face.
+ * Per Google's docs the description should be a generic 2-4 word noun phrase
+ * — concrete enough to anchor (gender + age tier), abstract enough not to
+ * fight the visual reference (no hair/skin/eyes prose).
  *
- * Signature is preserved so existing callers continue to compile.
+ *   "the man"          ← unset gender + young
+ *   "the mature man"   ← male + mature
+ *   "the distinguished woman" ← female + distinguished
+ *
+ * The `_isPrimary` and `_viewIndex` parameters are kept for API
+ * compatibility but no longer affect output: every reference of the same
+ * person uses the same `referenceId: 1` and the same description.
  */
 export function buildSubjectDescription(
-  _profile: SubjectProfile,
+  profile: SubjectProfile,
   _isPrimary: boolean,
   _viewIndex: number,
 ): string {
-  return "A specific individual. The exact person shown in the reference images.";
+  const noun = GENDER_DESCRIPTOR[profile.gender]; // "man" | "woman" | "person"
+  const age = profile.ageTier === "young"
+    ? ""
+    : profile.ageTier === "mature"
+      ? "mature "
+      : "distinguished ";
+  return `the ${age}${noun}`;
 }
 
 /**

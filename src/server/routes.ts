@@ -1042,7 +1042,7 @@ apiRouter.post("/generate",
         );
 
         const resultBase64 = mode === "premium"
-          ? await aiProvider.generatePremiumTier(refs, prompt, profile)
+          ? await aiProvider.generatePremiumTier(refs, prompt, profile, validStyleId, index)
           : await aiProvider.generateFreeTier(refs, prompt);
 
         const resultBuffer = Buffer.from(resultBase64, "base64");
