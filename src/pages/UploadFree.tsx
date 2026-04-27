@@ -465,7 +465,7 @@ export default function UploadFree() {
           </div>
         </div>
 
-        <p className="text-center text-[10px] text-white/20 mt-6">v3.2</p>
+        <p className="text-center text-[10px] text-white/20 mt-6">v7.0</p>
       </main>
     </div>
   );
