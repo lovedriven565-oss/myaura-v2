@@ -195,13 +195,15 @@ export function buildPremiumPrompt(
   const style = [block.subject, block.environment, block.mood].join(", ");
   const identity = profile ? buildIdentityHeader(profile) : "";
 
-  return [
+  const basePrompt = [
     identity,
     GLOBAL_PHOTO_ANCHOR + block.label + ".",
     IDENTITY_LOCK_MODULE,
     `${framing}, ${style}.`,
     TEXTURE_INJECTION_MODULE,
   ].filter(Boolean).join(" ");
+
+  return `${basePrompt}\n\nDO NOT GENERATE: ${NEGATIVE_PROMPT}`;
 }
 
 export function buildPrompt(

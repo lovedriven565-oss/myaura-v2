@@ -30,11 +30,9 @@
 import { GoogleGenAI } from "@google/genai";
 import fs from "fs";
 import path from "path";
-import { NEGATIVE_PROMPT } from "./prompts";
 import {
   AUDIT_PROMPT,
   parseAuditResponse,
-  buildSubjectDescription,
   type PreflightAudit,
   type SubjectProfile,
 } from "./biometric.js";
@@ -78,7 +76,7 @@ export interface IGenerationProvider {
 // ─── Model IDs & Regions ────────────────────────────────────────────────────
 
 const FLASH_MODEL = "gemini-3.1-flash-image-preview";
-const IMAGEN_MODEL = "imagen-3.0-generate-001";
+const PRO_MODEL = "gemini-3-pro-image-preview";
 
 // V7.0: dedicated text+vision judge for the preflight audit. Default to
 // gemini-2.5-flash (text-output capable); operators can override via
@@ -88,25 +86,10 @@ const JUDGE_MODEL = process.env.JUDGE_MODEL_ID || "gemini-2.5-flash";
 // Preview Gemini models are served ONLY by the Vertex AI `global` endpoint;
 // regional endpoints return 404. Verified 2026-04-21.
 const FLASH_LOCATION = "global";
-const FLASH_API_VERSION = "v1beta1";
+const API_VERSION = "v1beta1";
 
-// Imagen `predict` is REGIONAL. `global` is invalid for Imagen. Allow override
-// so ops can flip between us-central1 (default) and europe-west4 without code
-// changes if one region exhibits a local outage or quota pressure.
-const IMAGEN_LOCATION_ALLOWLIST = new Set<string>(["us-central1", "europe-west4"]);
-function resolveImagenLocation(): string {
-  const raw = (process.env.VERTEX_AI_IMAGEN_LOCATION || "").trim();
-  if (!raw) return "us-central1";
-  if (!IMAGEN_LOCATION_ALLOWLIST.has(raw)) {
-    console.warn(
-      `[ai] VERTEX_AI_IMAGEN_LOCATION='${raw}' is not allowed ` +
-      `(${[...IMAGEN_LOCATION_ALLOWLIST].join(", ")}). Falling back to us-central1.`
-    );
-    return "us-central1";
-  }
-  return raw;
-}
-const IMAGEN_LOCATION = resolveImagenLocation();
+// Pro uses the same global endpoint as Flash
+const PRO_LOCATION = "global";
 
 // ─── Timeouts ───────────────────────────────────────────────────────────────
 // Per-model timeouts are enforced via disposable AbortControllers (httpOptions
@@ -115,7 +98,7 @@ const IMAGEN_LOCATION = resolveImagenLocation();
 // background path, so generous timeouts are safe — no aggressive hacks.
 
 const FLASH_CALL_TIMEOUT_MS   =  90_000;  // 90s: plenty for a single flash call
-const IMAGEN_CALL_TIMEOUT_MS  = 120_000;  // 120s: Subject Customization is heavier
+const PRO_CALL_TIMEOUT_MS     = 120_000;  // 120s: Pro model is heavier
 const JUDGE_CALL_TIMEOUT_MS   =  45_000;  // 45s: 1 multimodal call, 1-15 imgs in
 
 // ─── Retry tuning (rate-limit resilience) ───────────────────────────────────
@@ -358,7 +341,7 @@ export class VertexAIProvider implements IGenerationProvider {
     if (!refs || refs.length === 0) throw new Error("generateFreeTier: refs[] required");
     console.log(`[FREE] flash | refs=${refs.length} | region=${FLASH_LOCATION}`);
     return withRateLimitRetry(
-      () => this._callFlash(refs, prompt, /*temp*/ 0.4, /*topP*/ 0.95),
+      () => this._callGeminiImage(FLASH_MODEL, FLASH_LOCATION, FLASH_CALL_TIMEOUT_MS, refs, prompt, 0.4, 0.95, "FREE.flash"),
       "FREE.flash",
     );
   }
@@ -371,29 +354,26 @@ export class VertexAIProvider implements IGenerationProvider {
   ): Promise<string> {
     if (!refs || refs.length === 0) throw new Error("generatePremiumTier: refs[] required");
 
-    // Primary: Imagen 3 Subject Customization with profile-anchored
-    // subjectDescription (the LoRA-equivalent identity lever).
+    // Primary: Pro model with profile-anchored identity header already inside the prompt.
     console.log(
-      `[PREMIUM] imagen | refs=${refs.length} | region=${IMAGEN_LOCATION} | ` +
-      `profile=${profile ? `${profile.gender}/${profile.ageTier}/${profile.skinTone}/${profile.hairColor}` : "none"}`
+      `[PREMIUM] pro | refs=${refs.length} | region=${PRO_LOCATION} | ` +
+      `profile=${profile ? `${profile.gender}/${profile.ageTier}` : "none"}`
     );
     try {
       return await withRateLimitRetry(
-        () => this._callImagenSubjectCustomization(refs, prompt, profile),
-        "PREMIUM.imagen",
+        () => this._callGeminiImage(PRO_MODEL, PRO_LOCATION, PRO_CALL_TIMEOUT_MS, refs, prompt, 0.1, 0.9, "PREMIUM.pro"),
+        "PREMIUM.pro",
       );
-    } catch (imagenErr: any) {
-      const msg = (imagenErr?.message || String(imagenErr)).slice(0, 300);
-      console.error("🚨 IMAGEN FAILED: FALLING BACK TO FLASH", imagenErr);
-      console.warn(`[PREMIUM] imagen failed → falling back to flash. err=${msg}`);
+    } catch (proErr: any) {
+      const msg = (proErr?.message || String(proErr)).slice(0, 300);
+      console.error("🚨 PRO FAILED: FALLING BACK TO FLASH", proErr);
+      console.warn(`[PREMIUM] pro failed → falling back to flash. err=${msg}`);
     }
 
-    // Graceful fallback: Flash (global) with all refs inline. The prompt
-    // already carries the identity header (built by prompts.ts) so the
-    // fallback also benefits from the biometric anchor.
+    // Graceful fallback: Flash (global) with all refs inline.
     console.log(`[PREMIUM-FALLBACK] flash | refs=${refs.length} | region=${FLASH_LOCATION}`);
     return withRateLimitRetry(
-      () => this._callFlash(refs, prompt, /*temp*/ 0.1, /*topP*/ 0.9),
+      () => this._callGeminiImage(FLASH_MODEL, FLASH_LOCATION, FLASH_CALL_TIMEOUT_MS, refs, prompt, 0.1, 0.9, "PREMIUM.flash-fallback"),
       "PREMIUM.flash-fallback",
     );
   }
@@ -408,19 +388,23 @@ export class VertexAIProvider implements IGenerationProvider {
     );
   }
 
-  // ─── Flash call (shared by free and premium fallback) ─────────────────
-  private async _callFlash(
+  // ─── Gemini Image Generation (shared by free, premium, and fallback) ────
+  private async _callGeminiImage(
+    modelId: string,
+    location: string,
+    timeoutMs: number,
     refs: ImageRef[],
     prompt: string,
     temperature: number,
     topP: number,
+    label: string,
   ): Promise<string> {
     const slot = await getNextSlot();
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), FLASH_CALL_TIMEOUT_MS);
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const client = createClient(slot, controller.signal, FLASH_LOCATION, FLASH_API_VERSION);
+      const client = createClient(slot, controller.signal, location, API_VERSION);
 
       // Multimodal payload: image parts first, then text prompt.
       const contents: any[] = refs.map(r => ({
@@ -429,7 +413,7 @@ export class VertexAIProvider implements IGenerationProvider {
       contents.push({ text: prompt });
 
       const response = await client.models.generateContent({
-        model: FLASH_MODEL,
+        model: modelId,
         contents,
         config: {
           // @ts-ignore — SDK type doesn't expose responseModalities yet
@@ -445,132 +429,13 @@ export class VertexAIProvider implements IGenerationProvider {
       for (const part of response.candidates?.[0]?.content?.parts || []) {
         if (part.inlineData?.data) return part.inlineData.data;
       }
-      throw new Error(`[flash] model returned no image parts`);
+      throw new Error(`[${label}] model returned no image parts`);
     } catch (err: any) {
       clearTimeout(timeoutId);
-      this._classifyAndCooldown(slot, err, "flash");
+      this._classifyAndCooldown(slot, err, label);
       if (controller.signal.aborted) {
         throw Object.assign(
-          new Error(`[flash] timeout after ${FLASH_CALL_TIMEOUT_MS}ms`),
-          { isTimeout: true },
-        );
-      }
-      throw err;
-    }
-  }
-
-  // ─── Imagen 3 Subject Customization (predict endpoint) ────────────────
-  private async _callImagenSubjectCustomization(
-    refs: ImageRef[],
-    prompt: string,
-    profile: SubjectProfile | null,
-  ): Promise<string> {
-    const slot = await getNextSlot();
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), IMAGEN_CALL_TIMEOUT_MS);
-
-    try {
-      const { GoogleAuth } = await import("google-auth-library");
-      const auth = new GoogleAuth({
-        keyFile: slot.isAdc ? undefined : slot.keyPath,
-        scopes: ["https://www.googleapis.com/auth/cloud-platform"],
-        projectId: slot.projectId || VERTEX_ADC_PROJECT,
-      });
-      const authClient = await auth.getClient();
-      const { token: accessToken } = await authClient.getAccessToken();
-      if (!accessToken) throw new Error("[imagen] failed to obtain GCP access token");
-
-      const project = slot.projectId || VERTEX_ADC_PROJECT;
-      const url =
-        `https://${IMAGEN_LOCATION}-aiplatform.googleapis.com/v1beta1/` +
-        `projects/${project}/locations/${IMAGEN_LOCATION}/publishers/google/models/${IMAGEN_MODEL}:predict`;
-
-      // V7.0: profile-anchored subjectDescription is THE LoRA-equivalent
-      // lever. When the audit could not produce a profile, fall back to a
-      // generic-but-honest description (clearly worse for likeness, but the
-      // request still goes through).
-      const subjectDescriptionFor = (idx: number) =>
-        profile
-          ? buildSubjectDescription(profile, idx === 0, idx)
-          : idx === 0
-            ? "Primary identity reference: a real photograph of one specific person. Preserve exact facial geometry, bone structure, proportions, and skin texture from this photograph."
-            : `Additional reference of the same single individual (view ${idx + 1}). Same person across all references.`;
-
-      // Build reference images:
-      //   id 1..N  : REFERENCE_TYPE_SUBJECT (each uploaded photo, up to 15)
-      //   id 99    : REFERENCE_TYPE_CONTROL (FACE_MESH anchor, first ref)
-      const subjectRefs = refs.map((r, idx) => ({
-        referenceType: "REFERENCE_TYPE_SUBJECT",
-        referenceId: idx + 1,
-        referenceImage: { bytesBase64Encoded: r.base64, mimeType: r.mimeType },
-        subjectImageConfig: {
-          subjectDescription: subjectDescriptionFor(idx),
-          subjectType: "SUBJECT_TYPE_PERSON",
-        },
-      }));
-
-      const faceMeshRef = {
-        referenceType: "REFERENCE_TYPE_CONTROL",
-        referenceId: 99,
-        referenceImage: { bytesBase64Encoded: refs[0].base64, mimeType: refs[0].mimeType },
-        controlImageConfig: {
-          controlType: "CONTROL_TYPE_FACE_MESH",
-          enableControlImageComputation: true,
-        },
-      };
-
-      const body = {
-        instances: [{ prompt }],
-        parameters: {
-          sampleCount: 1,
-          aspectRatio: "9:16",
-          personGeneration: "ALLOW_ADULT",
-          negativePrompt: NEGATIVE_PROMPT,
-          referenceImages: [...subjectRefs, faceMeshRef],
-        },
-      };
-
-      console.log("🔍 IMAGEN PAYLOAD:", JSON.stringify(body, null, 2));
-
-      const fetchFn = (await import("node-fetch")).default || globalThis.fetch;
-      const response = await fetchFn(url, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      } as any);
-
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        const errText = await response.text();
-        throw Object.assign(
-          new Error(`[imagen] predict HTTP ${response.status}: ${errText.slice(0, 400)}`),
-          { status: response.status },
-        );
-      }
-
-      const data = await response.json() as any;
-      const predictions = data?.predictions || [];
-      if (predictions.length === 0) {
-        throw new Error(`[imagen] predict returned no predictions: ${safeStringify(data).slice(0, 400)}`);
-      }
-      const b64 = predictions[0]?.bytesBase64Encoded;
-      if (!b64) {
-        // Possible safety block: the body usually contains raiFilteredReason.
-        const reason = predictions[0]?.raiFilteredReason || "no bytesBase64Encoded";
-        throw new Error(`[imagen] prediction missing image bytes: ${reason}`);
-      }
-      return b64;
-    } catch (err: any) {
-      clearTimeout(timeoutId);
-      this._classifyAndCooldown(slot, err, "imagen");
-      if (controller.signal.aborted) {
-        throw Object.assign(
-          new Error(`[imagen] timeout after ${IMAGEN_CALL_TIMEOUT_MS}ms`),
+          new Error(`[${label}] timeout after ${timeoutMs}ms`),
           { isTimeout: true },
         );
       }
@@ -590,7 +455,7 @@ export class VertexAIProvider implements IGenerationProvider {
     const timeoutId = setTimeout(() => controller.abort(), JUDGE_CALL_TIMEOUT_MS);
 
     try {
-      const client = createClient(slot, controller.signal, FLASH_LOCATION, FLASH_API_VERSION);
+      const client = createClient(slot, controller.signal, FLASH_LOCATION, API_VERSION);
 
       const contents: any[] = refs.map(r => ({
         inlineData: { data: r.base64, mimeType: r.mimeType },
