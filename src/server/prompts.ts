@@ -15,7 +15,7 @@
 // ═════════════════════════════════════════════════════════════════════════════
 
 import type { SubjectProfile } from "./biometric.js";
-import { buildIdentityHeader, buildSubjectDescription } from "./biometric.js";
+import { buildIdentityHeader } from "./biometric.js";
 
 export type PromptTier = "free" | "premium";
 
@@ -219,44 +219,50 @@ export function buildPrompt(
     : buildFreePrompt(styleId, index, profile);
 }
 
-// ─── PREMIUM tier (Imagen 3 Subject Customization, V8.0) ───────────────────
+// ─── PREMIUM tier (Imagen 3 Subject Customization, V8.1) ───────────────────
 /**
- * Builds the prompt template required by Imagen 3 Subject Customization.
+ * Builds the prompt template for Imagen 3 Subject Customization.
  *
- * Imagen 3 expects the prompt to contain `[$referenceId]` markers that the
- * cross-attention layer replaces with the subject identity at inference
- * time. Convention: the noun phrase from `subjectDescription` is followed
- * by `[1]`, e.g. `"a portrait of the mature man [1] in a business suit"`.
+ * V8.1 — Latent Space Conflict resolution:
+ *   The previous version threaded biometric prose ("strong jawline, full lips,
+ *   defined eyebrows") into both `subjectDescription` and the prompt body.
+ *   This activated the text-encoder hard enough to *suppress* the visual
+ *   embedding produced by SubjectReferenceImage, which is the entire reason
+ *   Imagen 3 Subject Customization exists. Outcome: poor likeness, idealized
+ *   "stock model" output that ignored the uploaded face.
  *
- * Unlike Gemini, Imagen 3 does NOT support a `negativePrompt` inside the
- * main prompt string — it is a top-level field on EditImageConfig. So this
- * function returns ONLY the positive prompt; the negative prompt must be
- * passed as `config.negativePrompt` by the caller.
+ * V8.1 fix:
+ *   - subjectDescription is the SHORTEST POSSIBLE neutral noun phrase that
+ *     keeps Imagen's [1] marker grammatically valid: "the exact person
+ *     shown in the reference images". No biometrics. No gender. No age.
+ *     The reference images carry that information natively.
+ *   - The prompt body is candid-photography only, with no DSLR/lens jargon
+ *     that would push outputs toward fashion-magazine attractor basins.
+ *   - The negative prompt is passed separately via `config.negativePrompt`
+ *     (Imagen 3 contract).
  *
- * Returns `{ prompt, subjectDescription }` so the caller can wire both
- * into the `editImage()` call: prompt → top-level, subjectDescription →
- * SubjectReferenceImage.config.subjectDescription.
+ * The `[1]` marker MUST appear immediately after the subjectDescription —
+ * Imagen replaces "${subjectDescription} [1]" with the locked identity at
+ * attention time. Any drift in this contract degrades likeness.
  */
+export const IMAGEN_NEUTRAL_SUBJECT = "the exact person shown in the reference images";
+
 export function buildPremiumImagenPrompt(
   styleId: StyleId,
   index: number,
-  profile: SubjectProfile,
+  _profile: SubjectProfile,
 ): { prompt: string; subjectDescription: string } {
   const block = STYLE_BLOCKS[styleId] || STYLE_BLOCKS.business;
   const framing = FRAMINGS[index % FRAMINGS.length];
-  const subjectDescription = buildSubjectDescription(profile, true, index);
-
-  // The [1] marker MUST appear immediately after the subjectDescription noun
-  // phrase. Imagen replaces "${subjectDescription} [1]" with the locked
-  // identity at attention time. Any drift in this contract degrades likeness.
+  const subjectDescription = IMAGEN_NEUTRAL_SUBJECT;
   const subjectToken = `${subjectDescription} [1]`;
 
   const prompt =
     `An unedited, candid photograph of ${subjectToken} in a ${block.label}. ` +
     `${framing}. ${block.subject}. ${block.environment}. ${block.mood}. ` +
-    `Natural everyday lighting. Authentic, unretouched amateur photography. ` +
+    `Natural, everyday lighting. Authentic, unretouched amateur photography. ` +
     `Real photographic skin texture with visible natural pores and micro-imperfections. ` +
-    `Preserve the exact face, bone structure, and proportions of ${subjectDescription} from the reference photos.`;
+    `Preserve the face from the reference images exactly — do not idealize, do not change age or ethnicity.`;
 
   return { prompt, subjectDescription };
 }

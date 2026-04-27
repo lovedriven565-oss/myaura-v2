@@ -34,11 +34,8 @@
 // request uses a disposable AbortController so timeouts actually close TCP.
 // ═════════════════════════════════════════════════════════════════════════════
 
-import {
-  GoogleGenAI,
-  SubjectReferenceImage,
-  SubjectReferenceType,
-} from "@google/genai";
+import { GoogleGenAI } from "@google/genai";
+import { GoogleAuth } from "google-auth-library";
 import fs from "fs";
 import path from "path";
 import {
@@ -456,24 +453,55 @@ export class VertexAIProvider implements IGenerationProvider {
     );
   }
 
-  // ─── Imagen 3 Subject Customization (V8.0 primary premium path) ───────
+  // ─── Imagen 3 Subject Customization (V8.1 — raw REST predict) ──────────
   /**
-   * The LoRA-equivalent face-preservation lever. All uploaded refs are wrapped
-   * as SubjectReferenceImage objects sharing the same `referenceId: 1` so
-   * Imagen 3 treats them as multi-view of THE SAME identity. The prompt is
-   * built internally from styleId/index/profile via buildPremiumImagenPrompt
-   * and contains a `[1]` marker that the cross-attention layer locks the
-   * reference identity onto.
+   * V8.1 — Raw `predict` REST call, bypassing the @google/genai SDK.
+   *
+   * Why raw REST instead of SDK editImage():
+   *   - The SDK's `editImage()` does NOT propagate `guidanceScale` into the
+   *     final HTTP `instances.parameters` — observed in production logs.
+   *     Without CFG control, Imagen 3 defaults to its baseline guidance and
+   *     refuses to lock the reference identity tightly.
+   *   - The SDK at certain versions also injected `controlImageConfig` with
+   *     CONTROL_TYPE_FACE_MESH automatically, which Vertex either rejects
+   *     (400) or interprets as a hybrid Customization+Control payload that
+   *     breaks identity preservation. We need a *minimal* Subject-only
+   *     payload, end of story.
+   *
+   * Payload shape (per Vertex AI v1 publishers/google/models/imagen-3.0-
+   * capability-001:predict):
+   *   {
+   *     instances: [{
+   *       prompt: "...[1]...",
+   *       referenceImages: [{
+   *         referenceType: "REFERENCE_TYPE_SUBJECT",
+   *         referenceId: 1,
+   *         referenceImage: { bytesBase64Encoded, mimeType },
+   *         subjectImageConfig: {
+   *           subjectType: "SUBJECT_TYPE_PERSON",
+   *           subjectDescription: "the exact person shown in the reference images"
+   *         }
+   *       }, ...]
+   *     }],
+   *     parameters: {
+   *       sampleCount: 1,
+   *       aspectRatio: "3:4",
+   *       guidanceScale: 5.0,
+   *       personGeneration: "allow_all",
+   *       negativePrompt: "...",
+   *       safetySetting: "block_only_high",
+   *       includeRaiReason: true,
+   *       language: "en"
+   *     }
+   *   }
    *
    * Notes:
-   *   - Imagen 3 has a hard limit of 4 reference images per call. We pick the
-   *     4 best refs (front + diversified angles); upstream audit already
-   *     ranks them by quality.
-   *   - guidanceScale: 5.0 is the empirically-tuned sweet spot for likeness.
-   *     Lower (e.g. 3.0) makes outputs drift; higher (e.g. 9.0) over-anchors
-   *     to the prompt and degrades realism.
-   *   - aspectRatio: "3:4" is the default portrait ratio matching the rest
-   *     of the pipeline (UI shows portraits, not landscape).
+   *   - Imagen 3 caps reference images at 4. Audit ranks refs by quality so
+   *     refs[0..3] are the cleanest front-facing shots.
+   *   - All refs share `referenceId: 1` — this signals to Imagen that they
+   *     are multi-view of the SAME identity (vs distinct subjects).
+   *   - `guidanceScale: 5.0` is the empirically-tuned sweet spot. Lower
+   *     drifts; higher over-anchors prompt and kills realism.
    */
   private async _callImagen3SubjectCustomization(
     refs: ImageRef[],
@@ -484,69 +512,123 @@ export class VertexAIProvider implements IGenerationProvider {
     const slot = await getNextSlot();
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), IMAGEN_CALL_TIMEOUT_MS);
+    const label = "PREMIUM.imagen";
 
     try {
-      const client = createClient(slot, controller.signal, IMAGEN_LOCATION, IMAGEN_API_VERSION);
       const { prompt, subjectDescription } = buildPremiumImagenPrompt(styleId, index, profile);
 
-      // Imagen 3 caps reference images at 4. Take the first 4 (audit ranks
-      // them by quality, so [0] is the cleanest front-facing shot).
+      // Take the first 4 refs (audit ranks them by quality).
       const usableRefs = refs.slice(0, 4);
 
-      const referenceImages = usableRefs.map(r => {
-        const ref = new SubjectReferenceImage();
-        ref.referenceId = 1;  // ALL refs share id=1 → "same person, multi-view"
-        ref.referenceImage = {
-          imageBytes: r.base64,
+      const referenceImages = usableRefs.map((r, i) => ({
+        referenceType: "REFERENCE_TYPE_SUBJECT",
+        referenceId: 1,  // ALL refs share id=1 → "same person, multi-view"
+        referenceImage: {
+          bytesBase64Encoded: r.base64,
           mimeType: r.mimeType,
-        };
-        ref.config = {
-          subjectType: SubjectReferenceType.SUBJECT_TYPE_PERSON,
+        },
+        subjectImageConfig: {
+          subjectType: "SUBJECT_TYPE_PERSON",
           subjectDescription,
-        };
-        return ref;
-      });
+        },
+        _viewIndex: i,  // stripped before send; only for log clarity
+      })).map(({ _viewIndex: _, ...keep }) => keep);
 
-      console.log(
-        `[PREMIUM.imagen] model=${IMAGEN_MODEL} refs=${referenceImages.length}/${refs.length} ` +
-        `desc="${subjectDescription}" prompt[0..120]="${prompt.slice(0, 120)}"`
-      );
-
-      const response = await client.models.editImage({
-        model: IMAGEN_MODEL,
-        prompt,
-        referenceImages,
-        config: {
-          numberOfImages: 1,
+      const payload = {
+        instances: [{
+          prompt,
+          referenceImages,
+        }],
+        parameters: {
+          sampleCount: 1,
           aspectRatio: "3:4",
           guidanceScale: 5.0,
-          // @ts-ignore — SDK enum vs string mismatch; Vertex accepts "allow_all"
           personGeneration: "allow_all",
           negativePrompt: NEGATIVE_PROMPT,
-          // @ts-ignore — SDK enum vs string mismatch; "block_only_high" matches
-          // the lenient policy used elsewhere in the pipeline.
-          safetyFilterLevel: "block_only_high",
-          httpOptions: { signal: controller.signal },
+          safetySetting: "block_only_high",
+          includeRaiReason: true,
+          language: "en",
         },
-      } as any);
+      };
+
+      // Auth: GoogleAuth honours GOOGLE_APPLICATION_CREDENTIALS (set per-slot
+      // for JSON keys) and falls back to ADC otherwise.
+      const prevCreds = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+      if (!slot.isAdc) process.env.GOOGLE_APPLICATION_CREDENTIALS = slot.keyPath;
+      const auth = new GoogleAuth({
+        scopes: ["https://www.googleapis.com/auth/cloud-platform"],
+      });
+      const accessTokenObj = await auth.getAccessToken();
+      const accessToken = typeof accessTokenObj === "string"
+        ? accessTokenObj
+        : (accessTokenObj as any)?.token;
+      if (prevCreds !== undefined) process.env.GOOGLE_APPLICATION_CREDENTIALS = prevCreds;
+      else if (!slot.isAdc) delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+      if (!accessToken) throw new Error(`[${label}] failed to obtain access token`);
+
+      const projectId = slot.isAdc ? VERTEX_ADC_PROJECT : slot.projectId;
+      if (!projectId) throw new Error(`[${label}] no project id resolved`);
+
+      const url =
+        `https://${IMAGEN_LOCATION}-aiplatform.googleapis.com/${IMAGEN_API_VERSION}/projects/${projectId}` +
+        `/locations/${IMAGEN_LOCATION}/publishers/google/models/${IMAGEN_MODEL}:predict`;
+
+      console.log(
+        `[${label}] model=${IMAGEN_MODEL} refs=${referenceImages.length}/${refs.length} ` +
+        `cfg=${payload.parameters.guidanceScale} desc="${subjectDescription}" ` +
+        `prompt[0..160]="${prompt.slice(0, 160)}"`
+      );
+
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json; charset=utf-8",
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
 
       clearTimeout(timeoutId);
 
-      const generated = response.generatedImages?.[0];
-      const imageBytes = generated?.image?.imageBytes;
+      if (!response.ok) {
+        const bodyText = await response.text().catch(() => "<unreadable>");
+        const err: any = new Error(
+          `[${label}] HTTP ${response.status}: ${bodyText.slice(0, 500)}`
+        );
+        err.status = response.status;
+        err.responseBody = bodyText;
+        throw err;
+      }
+
+      const json: any = await response.json();
+      const predictions: any[] = json?.predictions || [];
+      if (predictions.length === 0) {
+        throw new Error(`[${label}] response had no predictions`);
+      }
+
+      // Imagen 3 returns either bytesBase64Encoded (preferred) or imageBytes.
+      const first = predictions[0];
+      const imageBytes: string | undefined =
+        first?.bytesBase64Encoded || first?.imageBytes;
       if (!imageBytes) {
+        const raiReason = first?.raiFilteredReason;
+        if (raiReason) {
+          throw Object.assign(new Error(`[${label}] safety filter: ${raiReason}`), {
+            isSafetyBlock: true,
+          });
+        }
         throw new Error(
-          `[PREMIUM.imagen] response had no image bytes ` +
-          `(generated=${response.generatedImages?.length ?? 0})`
+          `[${label}] no image bytes in prediction (keys=${Object.keys(first || {}).join(",")})`
         );
       }
       return imageBytes;
     } catch (err: any) {
       clearTimeout(timeoutId);
-      this._classifyAndCooldown(slot, err, "PREMIUM.imagen");
+      this._classifyAndCooldown(slot, err, label);
       if (controller.signal.aborted) {
         throw Object.assign(
-          new Error(`[PREMIUM.imagen] timeout after ${IMAGEN_CALL_TIMEOUT_MS}ms`),
+          new Error(`[${label}] timeout after ${IMAGEN_CALL_TIMEOUT_MS}ms`),
           { isTimeout: true },
         );
       }
