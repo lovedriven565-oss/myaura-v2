@@ -31,6 +31,13 @@ import { GoogleGenAI } from "@google/genai";
 import fs from "fs";
 import path from "path";
 import { NEGATIVE_PROMPT } from "./prompts";
+import {
+  AUDIT_PROMPT,
+  parseAuditResponse,
+  buildSubjectDescription,
+  type PreflightAudit,
+  type SubjectProfile,
+} from "./biometric.js";
 
 // ─── Public Interface ───────────────────────────────────────────────────────
 
@@ -52,14 +59,31 @@ export interface IGenerationProvider {
    * PREMIUM tier. 10-15 refs → 1 output. Background async.
    * Primary: imagen-3.0-generate-001 Subject Customization (us-central1).
    * Fallback: gemini-3.1-flash-image-preview (global) with multi-ref inline.
+   *
+   * `profile` (optional) injects a rich subject description into Imagen's
+   * Subject Customization, which is the documented LoRA-equivalent lever for
+   * identity preservation. Pass `null` only when the audit was skipped.
    */
-  generatePremiumTier(refs: ImageRef[], prompt: string): Promise<string>;
+  generatePremiumTier(refs: ImageRef[], prompt: string, profile: SubjectProfile | null): Promise<string>;
+
+  /**
+   * Preflight biometric audit. Runs BEFORE credit consumption to catch bad
+   * uploads (sunglasses, blur, multi-people, no face) and to extract a
+   * structured biometric fingerprint that anchors identity through the rest
+   * of the pipeline. One Gemini 2.5 Flash call, all refs batched.
+   */
+  auditReferences(refs: ImageRef[]): Promise<PreflightAudit>;
 }
 
 // ─── Model IDs & Regions ────────────────────────────────────────────────────
 
 const FLASH_MODEL = "gemini-3.1-flash-image-preview";
 const IMAGEN_MODEL = "imagen-3.0-generate-001";
+
+// V7.0: dedicated text+vision judge for the preflight audit. Default to
+// gemini-2.5-flash (text-output capable); operators can override via
+// JUDGE_MODEL_ID for evaluation experiments.
+const JUDGE_MODEL = process.env.JUDGE_MODEL_ID || "gemini-2.5-flash";
 
 // Preview Gemini models are served ONLY by the Vertex AI `global` endpoint;
 // regional endpoints return 404. Verified 2026-04-21.
@@ -92,6 +116,7 @@ const IMAGEN_LOCATION = resolveImagenLocation();
 
 const FLASH_CALL_TIMEOUT_MS   =  90_000;  // 90s: plenty for a single flash call
 const IMAGEN_CALL_TIMEOUT_MS  = 120_000;  // 120s: Subject Customization is heavier
+const JUDGE_CALL_TIMEOUT_MS   =  45_000;  // 45s: 1 multimodal call, 1-15 imgs in
 
 // ─── Retry tuning (rate-limit resilience) ───────────────────────────────────
 const MAX_RETRIES = 2;
@@ -339,14 +364,22 @@ export class VertexAIProvider implements IGenerationProvider {
   }
 
   // ═════ PREMIUM TIER ═════════════════════════════════════════════════════
-  async generatePremiumTier(refs: ImageRef[], prompt: string): Promise<string> {
+  async generatePremiumTier(
+    refs: ImageRef[],
+    prompt: string,
+    profile: SubjectProfile | null,
+  ): Promise<string> {
     if (!refs || refs.length === 0) throw new Error("generatePremiumTier: refs[] required");
 
-    // Primary: Imagen 3 Subject Customization.
-    console.log(`[PREMIUM] imagen | refs=${refs.length} | region=${IMAGEN_LOCATION}`);
+    // Primary: Imagen 3 Subject Customization with profile-anchored
+    // subjectDescription (the LoRA-equivalent identity lever).
+    console.log(
+      `[PREMIUM] imagen | refs=${refs.length} | region=${IMAGEN_LOCATION} | ` +
+      `profile=${profile ? `${profile.gender}/${profile.ageTier}/${profile.skinTone}/${profile.hairColor}` : "none"}`
+    );
     try {
       return await withRateLimitRetry(
-        () => this._callImagenSubjectCustomization(refs, prompt),
+        () => this._callImagenSubjectCustomization(refs, prompt, profile),
         "PREMIUM.imagen",
       );
     } catch (imagenErr: any) {
@@ -355,11 +388,23 @@ export class VertexAIProvider implements IGenerationProvider {
       console.warn(`[PREMIUM] imagen failed → falling back to flash. err=${msg}`);
     }
 
-    // Graceful fallback: Flash (global) with all refs inline.
+    // Graceful fallback: Flash (global) with all refs inline. The prompt
+    // already carries the identity header (built by prompts.ts) so the
+    // fallback also benefits from the biometric anchor.
     console.log(`[PREMIUM-FALLBACK] flash | refs=${refs.length} | region=${FLASH_LOCATION}`);
     return withRateLimitRetry(
       () => this._callFlash(refs, prompt, /*temp*/ 0.1, /*topP*/ 0.9),
       "PREMIUM.flash-fallback",
+    );
+  }
+
+  // ═════ AUDIT ═════════════════════════════════════════════════════════════
+  async auditReferences(refs: ImageRef[]): Promise<PreflightAudit> {
+    if (!refs || refs.length === 0) throw new Error("auditReferences: refs[] required");
+    console.log(`[AUDIT] judge=${JUDGE_MODEL} | refs=${refs.length}`);
+    return withRateLimitRetry(
+      () => this._callJudgeJSON(refs, AUDIT_PROMPT),
+      "AUDIT.judge",
     );
   }
 
@@ -418,6 +463,7 @@ export class VertexAIProvider implements IGenerationProvider {
   private async _callImagenSubjectCustomization(
     refs: ImageRef[],
     prompt: string,
+    profile: SubjectProfile | null,
   ): Promise<string> {
     const slot = await getNextSlot();
     const controller = new AbortController();
@@ -439,6 +485,17 @@ export class VertexAIProvider implements IGenerationProvider {
         `https://${IMAGEN_LOCATION}-aiplatform.googleapis.com/v1beta1/` +
         `projects/${project}/locations/${IMAGEN_LOCATION}/publishers/google/models/${IMAGEN_MODEL}:predict`;
 
+      // V7.0: profile-anchored subjectDescription is THE LoRA-equivalent
+      // lever. When the audit could not produce a profile, fall back to a
+      // generic-but-honest description (clearly worse for likeness, but the
+      // request still goes through).
+      const subjectDescriptionFor = (idx: number) =>
+        profile
+          ? buildSubjectDescription(profile, idx === 0, idx)
+          : idx === 0
+            ? "Primary identity reference: a real photograph of one specific person. Preserve exact facial geometry, bone structure, proportions, and skin texture from this photograph."
+            : `Additional reference of the same single individual (view ${idx + 1}). Same person across all references.`;
+
       // Build reference images:
       //   id 1..N  : REFERENCE_TYPE_SUBJECT (each uploaded photo, up to 15)
       //   id 99    : REFERENCE_TYPE_CONTROL (FACE_MESH anchor, first ref)
@@ -447,10 +504,7 @@ export class VertexAIProvider implements IGenerationProvider {
         referenceId: idx + 1,
         referenceImage: { bytesBase64Encoded: r.base64, mimeType: r.mimeType },
         subjectImageConfig: {
-          subjectDescription:
-            idx === 0
-              ? "primary subject portrait: exact facial geometry, haircut, and skin texture"
-              : "additional reference of the same person from another angle",
+          subjectDescription: subjectDescriptionFor(idx),
           subjectType: "SUBJECT_TYPE_PERSON",
         },
       }));
@@ -517,6 +571,59 @@ export class VertexAIProvider implements IGenerationProvider {
       if (controller.signal.aborted) {
         throw Object.assign(
           new Error(`[imagen] timeout after ${IMAGEN_CALL_TIMEOUT_MS}ms`),
+          { isTimeout: true },
+        );
+      }
+      throw err;
+    }
+  }
+
+  // ─── Judge call (preflight biometric audit, JSON output) ─────────────
+  /**
+   * One Gemini 2.5 Flash multimodal call. All reference images go in as
+   * inlineData parts; the prompt asks for strict JSON. We return the
+   * parsed PreflightAudit shape via parseAuditResponse().
+   */
+  private async _callJudgeJSON(refs: ImageRef[], prompt: string): Promise<PreflightAudit> {
+    const slot = await getNextSlot();
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), JUDGE_CALL_TIMEOUT_MS);
+
+    try {
+      const client = createClient(slot, controller.signal, FLASH_LOCATION, FLASH_API_VERSION);
+
+      const contents: any[] = refs.map(r => ({
+        inlineData: { data: r.base64, mimeType: r.mimeType },
+      }));
+      contents.push({ text: prompt });
+
+      const response = await client.models.generateContent({
+        model: JUDGE_MODEL,
+        contents,
+        config: {
+          // @ts-ignore — SDK type doesn't expose responseMimeType cleanly
+          responseMimeType: "application/json",
+          safetySettings: SAFETY_SETTINGS,
+          temperature: 0.1,
+          topP: 0.9,
+        },
+      } as any);
+
+      clearTimeout(timeoutId);
+
+      // Concatenate any text parts the model returned. Most callers see one,
+      // but we are defensive in case the SDK splits the JSON across parts.
+      const parts = response.candidates?.[0]?.content?.parts || [];
+      const raw = parts.map((p: any) => p.text || "").join("").trim();
+      if (!raw) throw new Error(`[judge] model returned no text`);
+
+      return parseAuditResponse(raw, refs.length);
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      this._classifyAndCooldown(slot, err, "judge");
+      if (controller.signal.aborted) {
+        throw Object.assign(
+          new Error(`[judge] timeout after ${JUDGE_CALL_TIMEOUT_MS}ms`),
           { isTimeout: true },
         );
       }

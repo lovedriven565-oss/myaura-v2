@@ -76,24 +76,45 @@ gcloud services enable run.googleapis.com cloudbuild.googleapis.com
 # Build and push container
 gcloud builds submit --tag gcr.io/YOUR_PROJECT_ID/myaura:latest
 
-# Deploy to Cloud Run
+# Deploy to Cloud Run (v6.1 cost-optimized: scale-to-zero + always-on CPU)
 gcloud run deploy myaura \
   --image gcr.io/YOUR_PROJECT_ID/myaura:latest \
   --platform managed \
-  --region us-central1 \
+  --region europe-west1 \
   --allow-unauthenticated \
-  --memory 2Gi \
+  --memory 4Gi \
   --cpu 2 \
   --concurrency 80 \
-  --max-instances 10 \
-  --min-instances 1 \
-  --timeout 300 \
+  --max-instances 3 \
+  --min-instances 0 \
+  --no-cpu-throttling \
+  --execution-environment gen2 \
+  --timeout 60 \
   --set-env-vars "NODE_ENV=production" \
   --set-env-vars "SUPABASE_URL=https://..." \
   --set-env-vars "SUPABASE_ANON_KEY=..." \
   --set-env-vars "SUPABASE_SERVICE_ROLE_KEY=..." \
   # Add all other env vars...
 ```
+
+### v6.1 Cost-Optimization Rationale
+
+| Flag | Value | Why |
+|---|---|---|
+| `--min-instances` | `0` | Zero idle cost. Cold start ~3-5s is acceptable. |
+| `--max-instances` | `3` | Hard budget ceiling. 3× parallel Max batches is plenty. |
+| `--no-cpu-throttling` | — | **Critical.** Keeps CPU active for background image batches after `/generate` has already responded. |
+| `--execution-environment` | `gen2` | Required for `--no-cpu-throttling`; better networking. |
+| `--concurrency` | `80` | One instance handles 80 users before scaling. Generation is queued via `p-queue` so multi-user pile-up is smoothed. |
+| `--timeout` | `60` | `/generate` returns instantly; long batches run as background CPU, **not** as an open request. |
+
+### Scale-to-Zero Safety Net
+
+When Cloud Run reaps an idle instance with a long-running batch in flight (e.g. Max=60 photos, ~90 min wall-clock), our `SIGTERM` handler in `server.ts`:
+
+1. Logs every in-flight generation ID (see `src/server/lifecycle.ts`).
+2. Polls for drain up to `SHUTDOWN_GRACE_MS` (default 8s, must be < Cloud Run's 10s grace).
+3. Exits cleanly. Any unfinished generation is reclaimed by `reclaim_orphaned_generations` (see `src/server/watchdog.ts`) and the user's credit is refunded automatically.
 
 ### Option B: Cloud Build (Build in GCP)
 

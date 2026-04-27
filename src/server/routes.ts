@@ -3,12 +3,19 @@ import { v4 as uuidv4 } from "uuid";
 import { getDb } from "./db.js";
 import { storage } from "./storage.js";
 import { aiProvider, ImageRef } from "./ai.js";
-import { buildFreePrompt, buildPremiumPrompt, StyleId } from "./prompts.js";
+import { buildFreePrompt, buildPremiumPrompt, StyleId, AgeTier, Gender } from "./prompts.js";
+import {
+  evaluateAuditGate,
+  mergeProfile,
+  profileFromUserOnly,
+  type SubjectProfile,
+} from "./biometric.js";
 import { validatePackageInput, buildStyleScheduleWithCount, runBatched, getGenerationConfig, PACKAGES, generationQueue } from "./packages.js";
 import { deliverTelegramPhoto, deliverTelegramResults, notifyReferralAwarded, sendTelegramStatus } from "./telegram.js";
 import { clearRerollTracking } from "./qualityGate.js";
 import { refundCredit, checkRateLimit, clearRateLimit } from "./dbQueue.js";
 import { updateGenerationHeartbeat } from "./watchdog.js";
+import { markGenerationStart, markGenerationEnd, isShuttingDown } from "./lifecycle.js";
 import {
   MAX_FILE_SIZE_BYTES,
   MAX_FILES_PER_REQUEST,
@@ -474,10 +481,12 @@ const GenerateBodySchema = z.object({
   packageId: z.enum(["free", "starter", "pro", "max"]),
   mode: z.enum(["preview", "premium"]),
   styleIds: z.array(StyleIdEnum).min(1, "At least one style is required").max(6),
-  // Legacy fields — accepted for backward-compat with older clients but no
-  // longer used (V6.0 preserves identity/age via Imagen Subject Customization).
-  ageTier: z.enum(["young", "mature", "distinguished"]).optional(),
-  gender: z.enum(["male", "female", "unset"]).optional(),
+  // V7.0: ageTier + gender are first-class identity anchors. They are merged
+  // with the audit fingerprint to build the SubjectProfile that drives both
+  // the Imagen subjectDescription and the prompt identity header. Defaults
+  // mirror the frontend defaults so older clients still work.
+  ageTier: z.enum(["young", "mature", "distinguished"]).optional().default("mature"),
+  gender: z.enum(["male", "female", "unset"]).optional().default("unset"),
   telegramUserId: z.coerce.number().int().positive(),
   telegramChatId: z.coerce.number().int().optional(),
   // R2 object keys returned by /api/upload-urls. Regex enforces our canonical
@@ -759,6 +768,62 @@ apiRouter.post("/generate",
 
     const imageFiles = fetchResults as LoadedImage[];
 
+    // ── V7.0 Preflight Biometric Audit ──────────────────────────────────
+    // Goal: refuse bad uploads (sunglasses, blur, multi-people, no face)
+    // BEFORE consuming the user's credit, AND extract the biometric
+    // fingerprint that anchors identity through the rest of the pipeline.
+    //
+    // Cost: one Gemini 2.5 Flash multimodal call (~3-8s, all refs batched).
+    // ROI: prevents wasted Imagen 3 calls (~$0.04 each, ×60 for Max pack)
+    //      and produces the rich subjectDescription that lifts likeness
+    //      to LoRA-equivalent quality.
+    //
+    // Failure modes:
+    //   - Audit RPC itself errors  → log + skip gate, generate with a
+    //     user-only profile (graceful degradation; we never block a paying
+    //     user on our own infra failure).
+    //   - Audit returns gate=fail → respond 400 PHOTO_QUALITY_REJECTED
+    //     with actionable guidance (UI already handles this code).
+    const auditTier: "free" | "premium" = body.mode === "premium" ? "premium" : "free";
+    const auditRefs: ImageRef[] = imageFiles.map(f => ({
+      base64: f.buffer.toString("base64"),
+      mimeType: f.mimetype,
+    }));
+    const userGender: Gender = body.gender;
+    const userAgeTier: AgeTier = body.ageTier;
+    let profile: SubjectProfile = profileFromUserOnly(userGender, userAgeTier);
+    try {
+      const auditStart = Date.now();
+      const audit = await aiProvider.auditReferences(auditRefs);
+      const gate = evaluateAuditGate(audit, auditTier);
+      console.log(
+        `[${id}] AUDIT done in ${Date.now() - auditStart}ms | ` +
+        `usable=${gate.usableCount}/${gate.totalCount} | pass=${gate.pass} | ` +
+        `fp=${audit.fingerprint.perceivedGender}/${audit.fingerprint.apparentAge}/` +
+        `${audit.fingerprint.skinTone}/${audit.fingerprint.hairColor}`
+      );
+      if (!gate.pass) {
+        return res.status(400).json({
+          error: gate.reason || "Reference photos did not pass the quality check.",
+          code: "PHOTO_QUALITY_REJECTED",
+          details: {
+            usableCount: gate.usableCount,
+            totalCount: gate.totalCount,
+            rejectedReasons: gate.rejectedReasons,
+            perImage: audit.perImage,
+          },
+        });
+      }
+      profile = mergeProfile(audit, userGender, userAgeTier);
+    } catch (auditErr: any) {
+      // Audit infrastructure failure: degrade gracefully. The user-supplied
+      // gender/ageTier still anchors prompts, just without rich biometrics.
+      console.warn(
+        `[${id}] AUDIT failed (${auditErr?.message || auditErr}). ` +
+        `Continuing with user-only profile (gender=${userGender}, ageTier=${userAgeTier}).`
+      );
+    }
+
     // ── Rate limit: enforced here, AFTER all validation passes, BEFORE any
     //    credit/DB spend. This means invalid requests (Zod, auth, package,
     //    R2) never consume the user's cooldown budget — only legit attempts
@@ -896,6 +961,13 @@ apiRouter.post("/generate",
     res.json({ id, status: "processing" });
 
     // Background processing
+    // Cloud Run lifecycle: register this generation so the SIGTERM handler
+    // can log/await it before the instance is reaped. The watchdog still
+    // reclaims + refunds any zombie left behind by a hard SIGKILL.
+    markGenerationStart(id);
+    if (isShuttingDown()) {
+      console.warn(`[${id}] WARNING: instance is shutting down — background work may be killed before completion. Watchdog will refund.`);
+    }
     try {
       const schedule = buildStyleScheduleWithCount(config, styleIds as StyleId[], outputCount);
       const genConfig = getGenerationConfig(config.id);
@@ -961,13 +1033,16 @@ apiRouter.post("/generate",
         }
 
         const prompt = mode === "premium"
-          ? buildPremiumPrompt(validStyleId, index)
-          : buildFreePrompt(validStyleId, index);
+          ? buildPremiumPrompt(validStyleId, index, profile)
+          : buildFreePrompt(validStyleId, index, profile);
 
-        console.log(`[${id}] Image ${index}: tier=${mode} style=${validStyleId}`);
+        console.log(
+          `[${id}] Image ${index}: tier=${mode} style=${validStyleId} ` +
+          `profile=${profile.gender}/${profile.ageTier}/${profile.skinTone}/${profile.hairColor}`
+        );
 
         const resultBase64 = mode === "premium"
-          ? await aiProvider.generatePremiumTier(refs, prompt)
+          ? await aiProvider.generatePremiumTier(refs, prompt, profile)
           : await aiProvider.generateFreeTier(refs, prompt);
 
         const resultBuffer = Buffer.from(resultBase64, "base64");
@@ -1215,6 +1290,8 @@ apiRouter.post("/generate",
           console.error(`[${id}] Failed to refund after critical error:`, refundErr);
         }
       }
+    } finally {
+      markGenerationEnd(id);
     }
   } catch (error: any) {
     // Guard against "Cannot set headers after they are sent" — we already

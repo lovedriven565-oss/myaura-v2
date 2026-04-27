@@ -11,6 +11,7 @@ import { startRetentionCron } from "./src/server/retention.js";
 import { apiRouter, telegramWebhookHandler } from "./src/server/routes.js";
 import { initTelegramBot } from "./src/server/telegram.js";
 import { startWatchdogCron } from "./src/server/watchdog.js";
+import { getInFlightCount, getInFlightIds, setShuttingDown } from "./src/server/lifecycle.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -137,14 +138,65 @@ async function startServer() {
     console.log(`Server running on http://localhost:${PORT} (NODE_ENV=${process.env.NODE_ENV || "dev"})`);
   });
 
-  // Graceful shutdown — let in-flight requests finish.
-  const shutdown = (signal: string) => {
-    console.log(`Received ${signal}, shutting down gracefully...`);
-    server.close(() => process.exit(0));
-    setTimeout(() => {
-      console.warn("Forced shutdown after 10s grace period.");
-      process.exit(1);
-    }, 10_000).unref();
+  // ─── Graceful shutdown (Cloud Run-aware) ────────────────────────────────
+  // Cloud Run sends SIGTERM with ~10s grace before SIGKILL when an instance
+  // is reaped (idle scale-down with min-instances=0, revision rollout, etc.).
+  //
+  // Strategy:
+  //   1. Stop accepting new HTTP connections (server.close).
+  //   2. Log every in-flight background generation ID — these will be
+  //      reclaimed by `reclaim_orphaned_generations` and refunded by the
+  //      watchdog if SIGKILL hits before they finish.
+  //   3. Briefly poll for in-flight drain (up to SHUTDOWN_GRACE_MS) so short
+  //      batches can complete; long Premium batches (Max=60 photos) will
+  //      necessarily be reclaimed.
+  //
+  // SHUTDOWN_GRACE_MS is bounded by Cloud Run's terminationGracePeriodSeconds
+  // (default 10s for services). Tune below 10s to leave time for the final
+  // process.exit + log flush.
+  const SHUTDOWN_GRACE_MS = parseInt(process.env.SHUTDOWN_GRACE_MS || "8000", 10);
+  let shuttingDown = false;
+
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    setShuttingDown();
+
+    const inflight = getInFlightCount();
+    const ids = getInFlightIds();
+    console.warn(
+      `[Shutdown] Received ${signal}. inFlightGenerations=${inflight} ` +
+      `graceMs=${SHUTDOWN_GRACE_MS}` +
+      (inflight > 0 ? ` ids=[${ids.join(",")}]` : "")
+    );
+    if (inflight > 0) {
+      console.warn(
+        `[Shutdown] ${inflight} generation(s) in flight — any not finishing ` +
+        `within the grace window will be reclaimed by the watchdog and the ` +
+        `user's credit refunded.`
+      );
+    }
+
+    // Stop accepting new requests immediately.
+    server.close();
+
+    // Poll for drain.
+    const deadline = Date.now() + SHUTDOWN_GRACE_MS;
+    while (Date.now() < deadline && getInFlightCount() > 0) {
+      await new Promise(r => setTimeout(r, 250));
+    }
+
+    const remaining = getInFlightCount();
+    if (remaining === 0) {
+      console.log("[Shutdown] Drained cleanly — exiting 0.");
+      process.exit(0);
+    } else {
+      console.warn(
+        `[Shutdown] Grace period elapsed with ${remaining} generation(s) ` +
+        `still running: [${getInFlightIds().join(",")}]. Exiting 0; watchdog will reclaim.`
+      );
+      process.exit(0);
+    }
   };
   process.on("SIGTERM", () => shutdown("SIGTERM"));
   process.on("SIGINT", () => shutdown("SIGINT"));

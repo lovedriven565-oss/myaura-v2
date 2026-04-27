@@ -40,23 +40,33 @@ steps:
       - '4Gi'
       - '--cpu'
       - '2'
+      # v6.1 cost-optimization: 80 concurrent users per instance. Generation
+      # is queued (p-queue, single concurrency) so multi-user pile-up is
+      # smoothed; the 80 ceiling exists only to prevent socket exhaustion.
       - '--concurrency'
       - '80'
+      # v6.1 cost-optimization: hard ceiling on instance count to cap monthly
+      # spend. With 60-photo Max batches taking ~90 minutes wall-clock, three
+      # parallel users is plenty for current scale.
       - '--max-instances'
-      - '10'
+      - '3'
+      # v6.1 cost-optimization: scale-to-zero. No idle instance charges.
+      # Cold start (~3-5s on Gen2 + Node 20) is acceptable for a Telegram
+      # Mini App. Long-running Premium batches that outlive their parent
+      # request are protected by --no-cpu-throttling and the DB watchdog
+      # (see src/server/watchdog.ts) which refunds any zombie credit.
       - '--min-instances'
-      - '1'
-      # v3.6: Pro-model generations can take 4-6 min per image. A pack of 10
-      # premium photos therefore needs a long request window. /generate still
-      # returns {id, status:"processing"} quickly; the timeout protects the
-      # watchdog/heartbeat endpoints and any synchronous slow path.
+      - '0'
+      # v6.1: /generate returns immediately ({id,status:processing}); 60s
+      # request timeout is enough for every other endpoint (auth, status,
+      # presigned uploads). Long Premium batches run as background CPU
+      # under --no-cpu-throttling, NOT as open requests.
       - '--timeout'
-      - '900'
-      # v3.6: CRITICAL for long batch delivery. Without this, Cloud Run
-      # throttles CPU to ~0 after /generate has responded, which stalls the
-      # background image loop and causes partial-pack failures on premium.
-      # --no-cpu-throttling keeps CPU allocated for the full life of the
-      # instance so the background batch always makes progress.
+      - '60'
+      # v6.1 CRITICAL: keeps CPU allocated for background work after the
+      # HTTP response is sent. Without this, the Premium batch loop stalls
+      # the moment /generate responds. Combined with min-instances=0 the
+      # instance stays alive while CPU is busy, then idles down to zero.
       - '--no-cpu-throttling'
       # v3.6: Gen2 execution environment is required for --no-cpu-throttling
       # and gives us proper Linux networking (fewer "fetch failed" events).
