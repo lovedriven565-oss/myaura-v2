@@ -108,6 +108,8 @@ export default function Home() {
           <Link to="/privacy" className="hover:text-white/70 transition-colors">Политика конфиденциальности</Link>
           <span className="w-1 h-1 rounded-full bg-white/20"></span>
           <Link to="/terms" className="hover:text-white/70 transition-colors">Условия использования</Link>
+          <span className="w-1 h-1 rounded-full bg-white/20"></span>
+          <span>v8.2</span>
         </div>
       </main>
     </div>
