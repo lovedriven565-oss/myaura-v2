@@ -249,10 +249,18 @@ export interface AuditGateResult {
 export function evaluateAuditGate(
   audit: PreflightAudit,
   tier: "free" | "premium",
+  telegramUserId?: number // Added for testing/bypass logic
 ): AuditGateResult {
   const totalCount = audit.perImage.length;
   const usable = audit.perImage.filter(p => p.usable);
   const usableCount = usable.length;
+
+  // ── V9.0 God Mode Bypass ──
+  // Automatically passes audit for the dev test account regardless of quality.
+  if (telegramUserId && telegramUserId === parseInt(process.env.TEST_ACCOUNT_ID || "0", 10)) {
+    console.warn(`[Audit] 🚨 GOD MODE BYPASS ACTIVATED for user ${telegramUserId}. usable=${usableCount}/${totalCount}`);
+    return { pass: true, usableCount: totalCount, totalCount, rejectedReasons: [] };
+  }
 
   if (audit.fatalIssues.includes("different_people_detected") || !audit.fingerprint.sameIdentityAcrossPhotos) {
     return {

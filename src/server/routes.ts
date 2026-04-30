@@ -795,7 +795,8 @@ apiRouter.post("/generate",
     try {
       const auditStart = Date.now();
       const audit = await aiProvider.auditReferences(auditRefs);
-      const gate = evaluateAuditGate(audit, auditTier);
+      // Pass telegramUserId to support dev God Mode bypass
+      const gate = evaluateAuditGate(audit, auditTier, body.telegramUserId);
       console.log(
         `[${id}] AUDIT done in ${Date.now() - auditStart}ms | ` +
         `usable=${gate.usableCount}/${gate.totalCount} | pass=${gate.pass} | ` +
