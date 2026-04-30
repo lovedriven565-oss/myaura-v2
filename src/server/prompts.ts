@@ -237,6 +237,26 @@ export function buildPrompt(
  */
 export const IMAGEN_NEUTRAL_SUBJECT = "the exact person shown in the reference images";
 
+export function buildV9TunedPrompt(
+  styleId: StyleId,
+  index: number,
+  profile: SubjectProfile | null,
+): string {
+  const block = STYLE_BLOCKS[styleId] || STYLE_BLOCKS.business;
+  const framing = FRAMINGS[index % FRAMINGS.length];
+  
+  // V9.0 uses the [V_TOK] default token from Vertex AI Subject Tuning
+  const subjectToken = "[V_TOK] person";
+  
+  const prompt =
+    `An unedited, candid photograph of ${subjectToken}. ` +
+    `${block.label}. ${framing}. ${block.subject}. ${block.environment}. ` +
+    `Natural, everyday lighting. Authentic, unretouched amateur photography. ` +
+    `${TEXTURE_INJECTION_MODULE} ${block.mood}.`;
+
+  return prompt;
+}
+
 export function buildPremiumImagenPrompt(
   styleId: StyleId,
   index: number,

@@ -47,3 +47,21 @@ export async function uploadTuningDataset(generationId: string, refs: ImageRef[]
   
   return `gs://${TUNING_BUCKET_NAME}/${gcsFolder}`;
 }
+
+/**
+ * Deletes the tuning dataset for a given generation to save storage costs.
+ */
+export async function deleteTuningDataset(generationId: string): Promise<void> {
+  try {
+    const bucket = storage.bucket(TUNING_BUCKET_NAME);
+    const prefix = `datasets/${generationId}/`;
+    
+    console.log(`[GCS] Deleting dataset: gs://${TUNING_BUCKET_NAME}/${prefix}`);
+    
+    await bucket.deleteFiles({ prefix });
+    
+    console.log(`[GCS] Successfully deleted dataset for generation ${generationId}`);
+  } catch (err: any) {
+    console.error(`[GCS] Error deleting dataset for generation ${generationId}:`, err);
+  }
+}

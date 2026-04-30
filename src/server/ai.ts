@@ -99,6 +99,11 @@ export interface IGenerationProvider {
    * of the pipeline. One Gemini 2.5 Flash call, all refs batched.
    */
   auditReferences(refs: ImageRef[]): Promise<PreflightAudit>;
+
+  // V9.0 Subject Tuning API methods
+  checkTuningJobStatus(tuningJobId: string): Promise<{ status: string; tunedModelName?: string; error?: string }>;
+  generateFromTunedModel(tunedModelName: string, prompt: string): Promise<string>;
+  deleteTunedModel(tunedModelName: string): Promise<void>;
 }
 
 // ─── Model IDs & Regions ────────────────────────────────────────────────────
@@ -775,6 +780,159 @@ export class VertexAIProvider implements IGenerationProvider {
         );
       }
       throw err;
+    }
+  }
+
+  // ═════ V9.0 SUBJECT TUNING METADATA & INFERENCE ══════════════════════════
+  
+  async checkTuningJobStatus(tuningJobId: string): Promise<{ status: string; tunedModelName?: string; error?: string }> {
+    const label = "PREMIUM.checkTuning";
+    const slot = await getNextSlot();
+    const projectId = slot.isAdc ? VERTEX_ADC_PROJECT : slot.projectId;
+    if (!projectId) throw new Error(`[${label}] no project id resolved`);
+
+    // e.g., tuningJobId = projects/123/locations/us-central1/tuningJobs/456
+    // If tuningJobId is just the ID, we could reconstruct it, but V9 returns the full resource name.
+    const url = `https://${IMAGEN_LOCATION}-aiplatform.googleapis.com/v1/${tuningJobId}`;
+    
+    // Auth for raw REST call
+    const prevCreds = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    if (!slot.isAdc) process.env.GOOGLE_APPLICATION_CREDENTIALS = slot.keyPath;
+    const auth = new GoogleAuth({ scopes: ["https://www.googleapis.com/auth/cloud-platform"] });
+    const accessTokenObj = await auth.getAccessToken();
+    const accessToken = typeof accessTokenObj === "string" ? accessTokenObj : (accessTokenObj as any)?.token;
+    if (prevCreds !== undefined) process.env.GOOGLE_APPLICATION_CREDENTIALS = prevCreds;
+    else if (!slot.isAdc) delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    
+    if (!accessToken) throw new Error(`[${label}] failed to obtain access token`);
+
+    const response = await fetch(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+
+    if (!response.ok) {
+      const bodyText = await response.text().catch(() => "<unreadable>");
+      throw new Error(`[${label}] HTTP ${response.status}: ${bodyText.slice(0, 300)}`);
+    }
+
+    const data: any = await response.json();
+    const state = data.state; // e.g., "JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED", "JOB_STATE_RUNNING"
+    
+    if (state === "JOB_STATE_SUCCEEDED") {
+      return { status: "succeeded", tunedModelName: data.tunedModel?.model || data.tunedModel?.endpoint };
+    } else if (state === "JOB_STATE_FAILED") {
+      return { status: "failed", error: data.error?.message || "Unknown Vertex AI Tuning Error" };
+    } else if (state === "JOB_STATE_PENDING" || state === "JOB_STATE_RUNNING" || state === "JOB_STATE_UNSPECIFIED" || state === "JOB_STATE_QUEUED" || state === "JOB_STATE_PREPARING") {
+      return { status: "running" };
+    } else {
+      return { status: "running" }; // Treat any intermediate state as running
+    }
+  }
+
+  async generateFromTunedModel(tunedModelName: string, prompt: string): Promise<string> {
+    const label = "PREMIUM.tunedInference";
+    return await withRateLimitRetry(async () => {
+      const slot = await getNextSlot();
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), IMAGEN_CALL_TIMEOUT_MS);
+
+      try {
+        const projectId = slot.isAdc ? VERTEX_ADC_PROJECT : slot.projectId;
+        if (!projectId) throw new Error(`[${label}] no project id resolved`);
+
+        // Auth
+        const prevCreds = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+        if (!slot.isAdc) process.env.GOOGLE_APPLICATION_CREDENTIALS = slot.keyPath;
+        const auth = new GoogleAuth({ scopes: ["https://www.googleapis.com/auth/cloud-platform"] });
+        const accessTokenObj = await auth.getAccessToken();
+        const accessToken = typeof accessTokenObj === "string" ? accessTokenObj : (accessTokenObj as any)?.token;
+        if (prevCreds !== undefined) process.env.GOOGLE_APPLICATION_CREDENTIALS = prevCreds;
+        else if (!slot.isAdc) delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+        
+        if (!accessToken) throw new Error(`[${label}] failed to obtain access token`);
+
+        // tunedModelName looks like: projects/123/locations/us-central1/models/456
+        const url = `https://${IMAGEN_LOCATION}-aiplatform.googleapis.com/v1/${tunedModelName}:predict`;
+
+        const payload = {
+          instances: [{ prompt }],
+          parameters: {
+            sampleCount: 1,
+            aspectRatio: "3:4",
+            personGeneration: "allow_adult",
+            negativePrompt: NEGATIVE_PROMPT,
+            safetySetting: "block_only_high",
+            outputOptions: { mimeType: "image/jpeg" }
+          },
+        };
+
+        const response = await fetch(url, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json; charset=utf-8",
+          },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
+
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+          const bodyText = await response.text().catch(() => "<unreadable>");
+          throw new Error(`[${label}] HTTP ${response.status}: ${bodyText.slice(0, 300)}`);
+        }
+
+        const json: any = await response.json();
+        const predictions: any[] = json?.predictions || [];
+        if (predictions.length === 0) throw new Error(`[${label}] response had no predictions`);
+
+        const first = predictions[0];
+        const imageBytes = first?.bytesBase64Encoded || first?.imageBytes;
+        if (!imageBytes) throw new Error(`[${label}] no image bytes in prediction`);
+        
+        return imageBytes;
+      } catch (err: any) {
+        clearTimeout(timeoutId);
+        this._classifyAndCooldown(slot, err, label);
+        if (controller.signal.aborted) {
+          throw Object.assign(new Error(`[${label}] timeout after ${IMAGEN_CALL_TIMEOUT_MS}ms`), { isTimeout: true });
+        }
+        throw err;
+      }
+    }, label);
+  }
+
+  async deleteTunedModel(tunedModelName: string): Promise<void> {
+    const label = "PREMIUM.deleteTunedModel";
+    const slot = await getNextSlot();
+    try {
+      const prevCreds = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+      if (!slot.isAdc) process.env.GOOGLE_APPLICATION_CREDENTIALS = slot.keyPath;
+      const auth = new GoogleAuth({ scopes: ["https://www.googleapis.com/auth/cloud-platform"] });
+      const accessTokenObj = await auth.getAccessToken();
+      const accessToken = typeof accessTokenObj === "string" ? accessTokenObj : (accessTokenObj as any)?.token;
+      if (prevCreds !== undefined) process.env.GOOGLE_APPLICATION_CREDENTIALS = prevCreds;
+      else if (!slot.isAdc) delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+
+      if (!accessToken) throw new Error(`[${label}] failed to obtain access token`);
+
+      const url = `https://${IMAGEN_LOCATION}-aiplatform.googleapis.com/v1/${tunedModelName}`;
+      
+      const response = await fetch(url, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+
+      if (!response.ok) {
+        const bodyText = await response.text().catch(() => "<unreadable>");
+        console.error(`[${label}] Failed to delete model ${tunedModelName}: ${response.status} ${bodyText.slice(0, 200)}`);
+      } else {
+        console.log(`[${label}] Successfully deleted tuned model ${tunedModelName}`);
+      }
+    } catch (err: any) {
+      console.error(`[${label}] Error deleting tuned model ${tunedModelName}:`, err);
     }
   }
 
