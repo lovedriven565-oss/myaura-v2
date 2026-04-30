@@ -968,6 +968,53 @@ apiRouter.post("/generate",
     if (isShuttingDown()) {
       console.warn(`[${id}] WARNING: instance is shutting down — background work may be killed before completion. Watchdog will refund.`);
     }
+
+    // ── V9.0 PREMIUM TIER (Tuning Initiation) ──
+    if (mode === "premium") {
+      try {
+        console.log(`[${id}] PREMIUM MODE: Starting V9.0 Vertex AI Subject Tuning Job`);
+        
+        const chatTarget = telegramChatId || telegramUserId;
+        if (chatTarget) {
+          sendTelegramStatus(chatTarget, "💎 Анализируем ваши фото и запускаем создание уникальной нейросети (LoRA). Это займет около 15-30 минут. Мы пришлем уведомление, когда ваши премиум-фото будут готовы!").catch(() => {});
+        }
+        
+        const refs: ImageRef[] = imageFiles.map(file => ({
+          base64: file.buffer.toString("base64"),
+          mimeType: file.mimetype,
+        }));
+        
+        // Call Phase 1 with the critical generationId context
+        await aiProvider.generatePremiumTier(refs, "", profile, "business", 0, id);
+        
+        console.log(`[${id}] PREMIUM MODE: Tuning Job started successfully. Awaiting Watchdog (Phase 2).`);
+      } catch (err: any) {
+        // Domain-Driven Error Logging
+        console.error(`\n[🚨 V9.0 Tuning Error] Ошибка инициализации датасета для генерации ${id}:`);
+        console.error(`   Причина: ${err.message || String(err)}`);
+        console.error(`   Потерян ли контекст? generationId=${id}`);
+        console.error(`   Trace: ${err.stack}\n`);
+        
+        const errMsg = err.message || String(err);
+        await db.from("generations").update({
+          status: "failed",
+          error_message: `Failed to start tuning job: ${errMsg}`
+        }).eq("id", id);
+        
+        const chatTarget = telegramChatId || telegramUserId;
+        if (chatTarget) {
+          sendTelegramStatus(chatTarget, "❌ Произошла ошибка при запуске обучения нейросети. Средства возвращены.").catch(() => {});
+        }
+        
+        const creditType = (req as any).creditType;
+        if (creditType && telegramUserId) {
+          await refundCredit(telegramUserId, creditType, id, `V9.0 Tuning Init Failed: ${errMsg}`).catch(e => console.error(e));
+        }
+      }
+      return; // Phase 1 is done, exit background task
+    }
+
+    // ── FREE / PREVIEW TIER (Direct Inference) ──
     try {
       const schedule = buildStyleScheduleWithCount(config, styleIds as StyleId[], outputCount);
       const genConfig = getGenerationConfig(config.id);
@@ -996,26 +1043,12 @@ apiRouter.post("/generate",
       const chatTarget = telegramChatId || telegramUserId;
       if (chatTarget) {
         sendTelegramStatus(chatTarget, "🎨 Анализируем ваш запрос...").catch(() => {});
-        if (mode === 'premium') {
-          // v3.6: Premium uses the heavy gemini-3-pro-image-preview model
-          // (4-6 min per image). Warn the user up front so they don't think
-          // the bot is stuck.
-          setTimeout(() => {
-            sendTelegramStatus(
-              chatTarget,
-              "💎 Premium-генерация запущена. Используется тяжелая Pro-модель максимального качества, " +
-              "процесс может занять от 3 до 10 минут (или больше, в зависимости от количества фото). " +
-              "Пожалуйста, подождите!"
-            ).catch(() => {});
-          }, 1500);
-        } else {
-          setTimeout(() => {
-            sendTelegramStatus(chatTarget, "✨ Создаём вашу уникальную ауру...").catch(() => {});
-          }, 2500);
-          setTimeout(() => {
-            sendTelegramStatus(chatTarget, "🌟 Применяем финальные штрихи...").catch(() => {});
-          }, 6000);
-        }
+        setTimeout(() => {
+          sendTelegramStatus(chatTarget, "✨ Создаём вашу уникальную ауру...").catch(() => {});
+        }, 2500);
+        setTimeout(() => {
+          sendTelegramStatus(chatTarget, "🌟 Применяем финальные штрихи...").catch(() => {});
+        }, 6000);
       }
 
       // Task for generating a single image. Routes cleanly to the V6.0
@@ -1032,18 +1065,14 @@ apiRouter.post("/generate",
           console.warn(`[${id}] Image ${index}: Invalid styleId "${styleId}", falling back to business`);
         }
 
-        const prompt = mode === "premium"
-          ? buildPremiumPrompt(validStyleId, index, profile)
-          : buildFreePrompt(validStyleId, index, profile);
+        const prompt = buildFreePrompt(validStyleId, index, profile);
 
         console.log(
           `[${id}] Image ${index}: tier=${mode} style=${validStyleId} ` +
           `profile=${profile.gender}/${profile.ageTier}/${profile.skinTone}/${profile.hairColor}`
         );
 
-        const resultBase64 = mode === "premium"
-          ? await aiProvider.generatePremiumTier(refs, prompt, profile, validStyleId, index)
-          : await aiProvider.generateFreeTier(refs, prompt);
+        const resultBase64 = await aiProvider.generateFreeTier(refs, prompt);
 
         const resultBuffer = Buffer.from(resultBase64, "base64");
         const resultPath = await storage.save(resultBuffer, `${id}_result_${index}.jpg`, "result");
@@ -1056,17 +1085,6 @@ apiRouter.post("/generate",
           completedCount++;
           successPaths.push(result.value);
           console.log(`[${id}] Image ${index + 1}/${schedule.length} completed (${completedCount} done)`);
-          
-          // Progressive Telegram delivery: send each premium photo immediately as it completes.
-          // Free (1 image) is delivered in the final batch call below to avoid double-send.
-          if (mode === 'premium') {
-            const chatTarget = telegramChatId || telegramUserId;
-            if (chatTarget) {
-              deliverTelegramPhoto(chatTarget, result.value).catch(err =>
-                console.error(`[${id}] Progressive delivery failed for image ${index + 1}: ${err.message}`)
-              );
-            }
-          }
         } else {
           failedCount++;
           failedIndices.push(index);
@@ -1126,12 +1144,6 @@ apiRouter.post("/generate",
         const toRescue = [...failedIndices];
         console.log(`[${id}] Rescue pass: re-running ${toRescue.length} failed image(s) | ` +
           `currently ${completedCount}/${schedule.length} done`);
-        if (chatTarget && mode === 'premium') {
-          sendTelegramStatus(
-            chatTarget,
-            `🔄 Дорабатываем ${toRescue.length} фото для полного комплекта…`,
-          ).catch(() => {});
-        }
         for (const idx of toRescue) {
           const styleId = schedule[idx];
           try {
@@ -1145,14 +1157,6 @@ apiRouter.post("/generate",
             if (fiPos >= 0) failedIndices.splice(fiPos, 1);
             console.log(`[${id}] Rescue ✓ image ${idx + 1}/${schedule.length} recovered ` +
               `(${completedCount}/${schedule.length} done)`);
-
-            // Progressive delivery for premium (free is single-image and is
-            // sent via deliverTelegramResults at the end).
-            if (mode === 'premium' && chatTarget) {
-              deliverTelegramPhoto(chatTarget, resultPath).catch(err =>
-                console.error(`[${id}] Rescue delivery failed for image ${idx + 1}: ${err.message}`)
-              );
-            }
 
             // Progressive DB heartbeat so the watchdog doesn't reclaim us
             // mid-rescue and so the frontend /status poll sees progress.
@@ -1208,14 +1212,13 @@ apiRouter.post("/generate",
       }
 
       // Referral award: fire after first completed free generation
-      if (finalStatus === "completed" && mode !== "premium" && telegramUserId) {
+      if (finalStatus === "completed" && telegramUserId) {
         tryAwardReferral(telegramUserId, id).catch(() => {}); // errors are logged inside
       }
 
       // Final Telegram delivery: only for free/preview (1 image).
-      // Premium images are already delivered progressively per-image above.
       let deliveryFailed = false;
-      if (completedCount > 0 && mode !== 'premium') {
+      if (completedCount > 0) {
         const targetChatId = telegramChatId || telegramUserId;
         if (targetChatId) {
           // Fetch (or mint) the user's referral_code so the delivery carries a share button.
