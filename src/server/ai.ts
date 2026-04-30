@@ -496,12 +496,12 @@ export class VertexAIProvider implements IGenerationProvider {
    *   }
    *
    * Notes:
-   *   - Imagen 3 caps reference images at 4. Audit ranks refs by quality so
-   *     refs[0..3] are the cleanest front-facing shots.
-   *   - All refs share `referenceId: 1` — this signals to Imagen that they
-   *     are multi-view of the SAME identity (vs distinct subjects).
-   *   - `guidanceScale: 5.0` is the empirically-tuned sweet spot. Lower
-   *     drifts; higher over-anchors prompt and kills realism.
+   *   - Imagen 3 Subject Customization allows max 2 refs for non-square
+   *     aspect ratios. Audit ranks refs by quality so refs[0..1] are used.
+   *   - All subject refs share `referenceId: 1` — multi-view of the SAME person.
+   *   - A 3rd ref (`referenceId: 2`) with CONTROL_TYPE_FACE_MESH locks
+   *     facial geometry to the best audit-ranked photo (Google-recommended).
+   *   - `guidanceScale: 7.0` strengthens visual-embedding adherence vs text.
    */
   private async _callImagen3SubjectCustomization(
     refs: ImageRef[],
@@ -521,7 +521,7 @@ export class VertexAIProvider implements IGenerationProvider {
       // aspect ratios (e.g. 3:4, 9:16). Audit already ranked refs by quality.
       const usableRefs = refs.slice(0, 2);
 
-      const referenceImages = usableRefs.map((r, i) => ({
+      const subjectImages = usableRefs.map((r, i) => ({
         referenceType: "REFERENCE_TYPE_SUBJECT",
         referenceId: 1,  // ALL refs share id=1 → "same person, multi-view"
         referenceImage: {
@@ -535,6 +535,8 @@ export class VertexAIProvider implements IGenerationProvider {
         _viewIndex: i,  // stripped before send; only for log clarity
       })).map(({ _viewIndex: _, ...keep }) => keep);
 
+      const referenceImages = subjectImages;
+
       const payload = {
         instances: [{
           prompt,
@@ -543,7 +545,7 @@ export class VertexAIProvider implements IGenerationProvider {
         parameters: {
           sampleCount: 1,
           aspectRatio: "3:4",
-          guidanceScale: 5.0,
+          guidanceScale: 4.0,
           personGeneration: "allow_all",
           negativePrompt: NEGATIVE_PROMPT,
           safetySetting: "block_only_high",
@@ -576,8 +578,8 @@ export class VertexAIProvider implements IGenerationProvider {
 
       console.log(
         `[${label}] model=${IMAGEN_MODEL} refs=${referenceImages.length}/${refs.length} ` +
-        `cfg=${payload.parameters.guidanceScale} desc="${subjectDescription}" ` +
-        `prompt[0..160]="${prompt.slice(0, 160)}"`
+        `(subj=${subjectImages.length}) cfg=${payload.parameters.guidanceScale} ` +
+        `desc="${subjectDescription}" prompt[0..160]="${prompt.slice(0, 160)}"`
       );
 
       const response = await fetch(url, {

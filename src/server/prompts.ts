@@ -59,8 +59,7 @@ export const NEGATIVE_PROMPT =
   "video game, game character, octane render, unreal engine, cinema 4d, blender, zbrush, " +
   "plastic skin, waxy skin, airbrushed, over-smoothed, beauty filter, instagram filter, " +
   "glossy doll skin, porcelain skin, uncanny valley, mannequin, action figure, statue, " +
-  "caricature, exaggerated features, idealized features, distorted face, deformed face, " +
-  "asymmetric eyes, extra fingers, fused fingers, extra limbs, masterpiece, artstation";
+  "masterpiece, artstation, stock photo face";
 
 // ─── V7.1 Photographic anchor (latent-space-conflict fix) ──────────────────
 // Concrete optical-physics terms ("85mm lens at f/1.8, full-frame DSLR") were
@@ -84,9 +83,9 @@ interface StyleBlock {
 const STYLE_BLOCKS: Record<StyleId, StyleBlock> = {
   business: {
     label: "professional business environment",
-    subject: "sharply tailored dark suit, crisp white shirt, composed professional posture",
-    environment: "modern glass-walled corporate office, soft diffused north-window light, subtle architectural bokeh",
-    mood: "confident, authoritative, quietly powerful",
+    subject: "sharply tailored suit, crisp shirt",
+    environment: "modern glass-walled corporate office, natural window light, subtle architectural bokeh",
+    mood: "natural, warm, approachable",
   },
   lifestyle: {
     label: "warm lifestyle setting",
@@ -96,26 +95,26 @@ const STYLE_BLOCKS: Record<StyleId, StyleBlock> = {
   },
   cinematic: {
     label: "cinematic film set",
-    subject: "dark structured clothing, contemplative gaze slightly off-camera",
-    environment: "low-key set with practical tungsten backlights, atmospheric haze",
-    mood: "moody, restrained, photographed on a film stock with natural grain",
+    subject: "dark structured clothing, natural gaze",
+    environment: "dimly lit room, practical lamps, authentic atmosphere",
+    mood: "atmospheric, naturally lit, photographed on a film stock with natural grain",
   },
   editorial: {
     label: "magazine cover photoshoot",
-    subject: "bold tailored silhouette, striking confident pose",
-    environment: "seamless paper-backdrop studio, overhead beauty dish, white fill reflector",
-    mood: "high-contrast, confident, sharp studio lighting captured by a 35mm camera",
+    subject: "tailored silhouette, natural pose",
+    environment: "seamless paper-backdrop, simple natural light",
+    mood: "clean lighting captured by a 35mm camera",
   },
   luxury: {
     label: "luxury heritage setting",
     subject: "bespoke silk, fine merino layering, subtle gold accents",
     environment: "grand private library or hotel suite, warm ambient reading lamps, antique texture",
-    mood: "quiet wealth, understated sophistication, heritage elegance",
+    mood: "understated sophistication, warm heritage elegance",
   },
   aura: {
-    label: "soft directional studio lighting setup",
+    label: "soft directional setup",
     subject: "flowing translucent fabric catching the light",
-    environment: "neutral gradient backdrop, soft volumetric light rays, gentle haze",
+    environment: "neutral gradient backdrop, natural ambient lighting",
     mood: "serene, softly lit, photographed with a portrait lens",
   },
   cyberpunk: {
@@ -133,7 +132,7 @@ const STYLE_BLOCKS: Record<StyleId, StyleBlock> = {
   ethereal: {
     label: "soft romantic photography setup",
     subject: "diaphanous pale fabric, serene expression, gentle chiaroscuro on the face",
-    environment: "soft misted studio, morning god-rays through dust particles, neutral gradient backdrop",
+    environment: "soft misted room, morning natural light, neutral gradient backdrop",
     mood: "serene, soft-focus, real photographic capture on a wide-aperture lens",
   },
 };
@@ -146,14 +145,6 @@ const FRAMINGS = [
   "environmental portrait with background depth",
   "relaxed posture three-quarter portrait",
 ];
-
-// ─── V7.0 Identity Lock Module ─────────────────────────────────────────────
-const IDENTITY_LOCK_MODULE =
-  "Using the provided reference photos, preserve the 100% exact facial geometry, " +
-  "bone structure, skin tone, and unique identifiers of the person. Do not alter " +
-  "the subject's identity, proportions, or age. Match the face unchanged with " +
-  "realistic skin texture, natural imperfections, and high-fidelity photorealism. " +
-  "This is a photograph, not an illustration.";
 
 // ─── V7.0 Texture Injection Module ─────────────────────────────────────────
 const TEXTURE_INJECTION_MODULE =
@@ -200,7 +191,6 @@ export function buildPremiumPrompt(
   const basePrompt = [
     identity,
     GLOBAL_PHOTO_ANCHOR + block.label + ".",
-    IDENTITY_LOCK_MODULE,
     `${framing}, ${style}.`,
     TEXTURE_INJECTION_MODULE,
   ].filter(Boolean).join(" ");
@@ -250,7 +240,7 @@ export const IMAGEN_NEUTRAL_SUBJECT = "the exact person shown in the reference i
 export function buildPremiumImagenPrompt(
   styleId: StyleId,
   index: number,
-  _profile: SubjectProfile,
+  profile: SubjectProfile,
 ): { prompt: string; subjectDescription: string } {
   const block = STYLE_BLOCKS[styleId] || STYLE_BLOCKS.business;
   const framing = FRAMINGS[index % FRAMINGS.length];
@@ -258,11 +248,10 @@ export function buildPremiumImagenPrompt(
   const subjectToken = `${subjectDescription} [1]`;
 
   const prompt =
-    `An unedited, candid photograph of ${subjectToken} in a ${block.label}. ` +
-    `${framing}. ${block.subject}. ${block.environment}. ${block.mood}. ` +
+    `An unedited, candid photograph of ${subjectToken}. ` +
+    `${block.label}. ${framing}. ${block.subject}. ${block.environment}. ` +
     `Natural, everyday lighting. Authentic, unretouched amateur photography. ` +
-    `Real photographic skin texture with visible natural pores and micro-imperfections. ` +
-    `Preserve the face from the reference images exactly — do not idealize, do not change age or ethnicity.`;
+    `${TEXTURE_INJECTION_MODULE} ${block.mood}.`;
 
   return { prompt, subjectDescription };
 }

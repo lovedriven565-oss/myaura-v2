@@ -356,9 +356,9 @@ export function mergeProfile(
 // ─── Prose builders ─────────────────────────────────────────────────────────
 
 const AGE_DESCRIPTOR: Record<AgeTier, string> = {
-  young: "in their twenties",
-  mature: "in their late thirties to forties",
-  distinguished: "in their fifties or older",
+  young: "in their early twenties",
+  mature: "in their early thirties",
+  distinguished: "in their late forties to fifties",
 };
 
 const GENDER_DESCRIPTOR: Record<Gender, string> = {
@@ -395,12 +395,10 @@ export function buildSubjectDescription(
   _viewIndex: number,
 ): string {
   const noun = GENDER_DESCRIPTOR[profile.gender]; // "man" | "woman" | "person"
-  const age = profile.ageTier === "young"
-    ? ""
-    : profile.ageTier === "mature"
-      ? "mature "
-      : "distinguished ";
-  return `the ${age}${noun}`;
+  // V9.0: Neutral subject anchor. Age/style adjectives in the [1] marker
+  // cause identity drift toward model averages. The visual reference
+  // carries the age; the prose should only provide the grammatic noun.
+  return `the ${noun}`;
 }
 
 /**
