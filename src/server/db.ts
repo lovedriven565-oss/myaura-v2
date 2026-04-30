@@ -21,6 +21,11 @@ export interface GenerationRow {
   telegram_chat_id: number | null;
   created_at?: string;
   updated_at?: string;
+  
+  // V9.0 Vertex AI Subject Tuning Fields
+  tuning_job_id?: string | null;
+  tuning_status?: 'pending' | 'running' | 'succeeded' | 'failed' | null;
+  tuned_model_resource_name?: string | null;
 }
 
 let supabase: SupabaseClient;

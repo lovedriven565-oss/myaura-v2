@@ -44,6 +44,8 @@ import {
   type PreflightAudit,
   type SubjectProfile,
 } from "./biometric.js";
+import { getDb } from "./db.js";
+import { uploadTuningDataset } from "./gcs.js";
 import { buildPremiumImagenPrompt, NEGATIVE_PROMPT } from "./prompts.js";
 import type { StyleId } from "./prompts.js";
 
@@ -87,6 +89,7 @@ export interface IGenerationProvider {
     profile: SubjectProfile | null,
     styleId?: StyleId,
     index?: number,
+    generationId?: string,
   ): Promise<string>;
 
   /**
@@ -385,62 +388,90 @@ export class VertexAIProvider implements IGenerationProvider {
     );
   }
 
-  // ═════ PREMIUM TIER (V8.0: Imagen 3 → Pro → Flash) ══════════════════════════
+  // ═════ PREMIUM TIER (V9.0: GCS Dataset + Vertex AI TuningJob) ══════════════
   async generatePremiumTier(
     refs: ImageRef[],
     fallbackPrompt: string,
     profile: SubjectProfile | null,
     styleId?: StyleId,
     index?: number,
+    generationId?: string,
   ): Promise<string> {
     if (!refs || refs.length === 0) throw new Error("generatePremiumTier: refs[] required");
+    if (!generationId) throw new Error("generatePremiumTier: generationId required for V9.0 Tuning Job");
 
-    // ── Primary path: Imagen 3 Subject Customization (when profile + styleId)
-    // This is the only Vertex AI model with a documented LoRA-equivalent
-    // face-preservation mechanism. Skip only if upstream couldn't audit
-    // (no profile) or didn't pass styleId (back-compat for legacy callers).
-    if (profile && styleId !== undefined && index !== undefined) {
-      console.log(
-        `[PREMIUM] imagen | refs=${refs.length} | region=${IMAGEN_LOCATION} | ` +
-        `style=${styleId} | profile=${profile.gender}/${profile.ageTier}`
-      );
-      try {
-        return await withRateLimitRetry(
-          () => this._callImagen3SubjectCustomization(refs, profile, styleId, index),
-          "PREMIUM.imagen",
-        );
-      } catch (imgErr: any) {
-        const msg = (imgErr?.message || String(imgErr)).slice(0, 300);
-        console.warn(`[PREMIUM] imagen failed → falling back to gemini pro. err=${msg}`);
+    const label = "PREMIUM.tuning";
+    console.log(`[${label}] generationId=${generationId} refs=${refs.length} profile=${profile?.gender}/${profile?.ageTier}`);
+
+    // Step 1: Upload all references to GCS for the tuning dataset
+    const gcsUri = await uploadTuningDataset(generationId, refs);
+    
+    // Step 2: Call Vertex AI TuningJob API
+    const slot = await getNextSlot();
+    const projectId = slot.isAdc ? VERTEX_ADC_PROJECT : slot.projectId;
+    if (!projectId) throw new Error(`[${label}] no project id resolved`);
+
+    // Using us-central1 as the primary region for Imagen tuning
+    const location = IMAGEN_LOCATION; 
+    
+    // Auth for raw REST call
+    const prevCreds = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    if (!slot.isAdc) process.env.GOOGLE_APPLICATION_CREDENTIALS = slot.keyPath;
+    const auth = new GoogleAuth({
+      scopes: ["https://www.googleapis.com/auth/cloud-platform"],
+    });
+    const accessTokenObj = await auth.getAccessToken();
+    const accessToken = typeof accessTokenObj === "string" ? accessTokenObj : (accessTokenObj as any)?.token;
+    if (prevCreds !== undefined) process.env.GOOGLE_APPLICATION_CREDENTIALS = prevCreds;
+    else if (!slot.isAdc) delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    
+    if (!accessToken) throw new Error(`[${label}] failed to obtain access token`);
+
+    const url = `https://${location}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/tuningJobs`;
+    
+    // V9.0 TuningJob payload for Imagen Subject Customization
+    const payload = {
+      baseModel: `projects/${projectId}/locations/${location}/publishers/google/models/imagen-3.0-generate-001`,
+      supervisedTuningSpec: {
+        trainingDatasetUri: gcsUri
       }
-    } else {
-      console.log(
-        `[PREMIUM] imagen SKIPPED → gemini pro | reason=` +
-        `${!profile ? "no-profile" : "no-styleId"}`
-      );
+    };
+
+    console.log(`[${label}] Starting tuning job on Vertex AI: ${url}`);
+    
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const bodyText = await response.text().catch(() => "<unreadable>");
+      console.error(`[${label}] Tuning Job failed to start:`, bodyText);
+      throw new Error(`[${label}] HTTP ${response.status}: ${bodyText.slice(0, 300)}`);
     }
 
-    // ── Fallback 1: Gemini 3 Pro Image (general image model)
-    console.log(
-      `[PREMIUM-FALLBACK] pro | refs=${refs.length} | region=${PRO_LOCATION} | ` +
-      `profile=${profile ? `${profile.gender}/${profile.ageTier}` : "none"}`
-    );
-    try {
-      return await withRateLimitRetry(
-        () => this._callGeminiImage(PRO_MODEL, PRO_LOCATION, PRO_CALL_TIMEOUT_MS, refs, fallbackPrompt, 0.1, 0.9, "PREMIUM.pro"),
-        "PREMIUM.pro",
-      );
-    } catch (proErr: any) {
-      const msg = (proErr?.message || String(proErr)).slice(0, 300);
-      console.warn(`[PREMIUM] pro failed → falling back to flash. err=${msg}`);
+    const data: any = await response.json();
+    const tuningJobId = data.name; // e.g., projects/123/locations/us-central1/tuningJobs/456
+    
+    console.log(`[${label}] Tuning Job started successfully: ${tuningJobId}`);
+
+    // Step 3: Update Supabase with the tuning_job_id and pending status
+    const db = getDb();
+    const { error: dbErr } = await db.from("generations").update({
+      tuning_job_id: tuningJobId,
+      tuning_status: "pending"
+    }).eq("id", generationId);
+
+    if (dbErr) {
+      console.error(`[${label}] Failed to update DB with tuning_job_id:`, dbErr);
+      throw new Error(`Failed to save tuning job state: ${dbErr.message}`);
     }
 
-    // ── Fallback 2: Gemini 3.1 Flash Image (always-available)
-    console.log(`[PREMIUM-FALLBACK] flash | refs=${refs.length} | region=${FLASH_LOCATION}`);
-    return withRateLimitRetry(
-      () => this._callGeminiImage(FLASH_MODEL, FLASH_LOCATION, FLASH_CALL_TIMEOUT_MS, refs, fallbackPrompt, 0.1, 0.9, "PREMIUM.flash-fallback"),
-      "PREMIUM.flash-fallback",
-    );
+    return "job_started"; // Returning dummy string since we bypassed generateOne loop
   }
 
   // ═════ AUDIT ═════════════════════════════════════════════════════════════
