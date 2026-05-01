@@ -436,7 +436,7 @@ export class VertexAIProvider implements IGenerationProvider {
     
     // V9.0 TuningJob payload for Imagen Subject Customization
     const payload = {
-      baseModel: `projects/${projectId}/locations/${location}/publishers/google/models/imagen-3.0-generate-001`,
+      baseModel: `publishers/google/models/imagen-3.0-generate-001`,
       supervisedTuningSpec: {
         trainingDatasetUri: gcsUri
       }
