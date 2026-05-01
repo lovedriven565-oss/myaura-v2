@@ -6,7 +6,7 @@ const storage = new Storage();
 
 // We need a bucket for the tuning datasets
 // Defaulting to "myaura-vertex-tuning" but can be overridden in env
-const TUNING_BUCKET_NAME = process.env.VERTEX_TUNING_BUCKET || "myaura-vertex-tuning";
+export const TUNING_BUCKET_NAME = process.env.VERTEX_TUNING_BUCKET || "myaura-vertex-tuning";
 
 /**
  * Uploads user reference images to GCS for Vertex AI Subject Tuning.

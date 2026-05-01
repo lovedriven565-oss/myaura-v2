@@ -45,7 +45,7 @@ import {
   type SubjectProfile,
 } from "./biometric.js";
 import { getDb } from "./db.js";
-import { uploadTuningDataset } from "./gcs.js";
+import { uploadTuningDataset, TUNING_BUCKET_NAME } from "./gcs.js";
 import { buildPremiumImagenPrompt, NEGATIVE_PROMPT } from "./prompts.js";
 import type { StyleId } from "./prompts.js";
 
@@ -435,10 +435,12 @@ export class VertexAIProvider implements IGenerationProvider {
     const url = `https://${location}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/tuningJobs`;
     
     // V9.0 TuningJob payload for Imagen Subject Customization
+    const outputUri = `gs://${TUNING_BUCKET_NAME}/tuned_models/${generationId}/`;
     const payload = {
       baseModel: `publishers/google/models/imagen-3.0-generate-001@001`,
       supervisedTuningSpec: {
-        trainingDatasetUri: gcsUri
+        trainingDatasetUri: gcsUri,
+        outputUri: outputUri,
       }
     };
 
