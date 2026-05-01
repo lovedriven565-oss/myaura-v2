@@ -43,9 +43,51 @@ export async function uploadTuningDataset(generationId: string, refs: ImageRef[]
 
   await Promise.all(uploadPromises);
   
-  console.log(`[GCS] Uploaded ${refs.length} images to gs://${TUNING_BUCKET_NAME}/${gcsFolder}`);
+  // Vertex AI TuningJob expects trainingDatasetUri to be a JSONL file,
+  // not a folder. Build a JSONL manifest that references each uploaded image.
+  const jsonlLines = refs.map((ref, index) => {
+    let ext = "jpg";
+    if (ref.mimeType.includes("png")) ext = "png";
+    else if (ref.mimeType.includes("webp")) ext = "webp";
+    else if (ref.mimeType.includes("heic")) ext = "heic";
+
+    const imageUri = `gs://${TUNING_BUCKET_NAME}/${gcsFolder}ref_${index}.${ext}`;
+
+    // Use Vertex AI multimodal tuning JSONL format (image + text pair)
+    const record = {
+      contents: [
+        {
+          role: "user",
+          parts: [
+            { text: `Portrait of a person, reference photo ${index + 1}` },
+            {
+              fileData: {
+                mimeType: ref.mimeType,
+                fileUri: imageUri,
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    return JSON.stringify(record);
+  });
+
+  const jsonlContent = jsonlLines.join("\n");
+  const jsonlFileName = `${gcsFolder}dataset.jsonl`;
+  const jsonlFile = bucket.file(jsonlFileName);
+
+  await jsonlFile.save(jsonlContent, {
+    contentType: "application/jsonl",
+    resumable: false,
+  });
+
+  const jsonlUri = `gs://${TUNING_BUCKET_NAME}/${jsonlFileName}`;
   
-  return `gs://${TUNING_BUCKET_NAME}/${gcsFolder}`;
+  console.log(`[GCS] Uploaded ${refs.length} images + dataset.jsonl to gs://${TUNING_BUCKET_NAME}/${gcsFolder}`);
+  
+  return jsonlUri;
 }
 
 /**
