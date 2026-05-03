@@ -6,11 +6,26 @@ const storage = new Storage();
 // Bucket for ingesting user reference images directly to GCS via Signed URLs
 export const INGESTION_BUCKET = process.env.INGESTION_BUCKET || "myaura-ingestion";
 
+export interface GcsUploadSlot {
+  key: string;
+  url: string;
+  headers: Record<string, string>;
+  expiresAt: number;
+}
+
 /**
  * Generates a V4 Signed URL for uploading an object directly to GCS.
  * Used to bypass the server and avoid R2/GCS protocol mismatch.
+ *
+ * IMPORTANT: GCS V4 signed URLs enforce an exact Content-Type match.
+ * The client MUST send the same contentType header on the PUT request,
+ * otherwise GCS returns 403 "Access Denied" or 400 "Bad Request".
  */
-export async function generateGcsUploadUrl(key: string, contentType: string, expiresInMinutes: number = 15): Promise<string> {
+export async function generateGcsUploadUrl(
+  key: string,
+  contentType: string,
+  expiresInMinutes: number = 15
+): Promise<GcsUploadSlot> {
   const bucket = storage.bucket(INGESTION_BUCKET);
   const file = bucket.file(key);
 
@@ -21,7 +36,14 @@ export async function generateGcsUploadUrl(key: string, contentType: string, exp
     contentType,
   });
 
-  return url;
+  return {
+    key,
+    url,
+    headers: {
+      "Content-Type": contentType,
+    },
+    expiresAt: Date.now() + expiresInMinutes * 60 * 1000,
+  };
 }
 
 /**

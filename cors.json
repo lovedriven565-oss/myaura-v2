@@ -1,0 +1,1 @@
+[{"origin":["*"],"method":["PUT","POST","GET","HEAD","OPTIONS"],"responseHeader":["Content-Type","x-goog-resumable","Access-Control-Allow-Origin"],"maxAgeSeconds":3600}]
