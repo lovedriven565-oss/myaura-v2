@@ -1,1 +1,1 @@
-gcloud run deploy myaura --source . --region europe-west1 --platform managed --allow-unauthenticated --memory 4Gi --cpu 2 --concurrency 80 --max-instances 3 --min-instances 0 --timeout 60 --no-cpu-throttling --execution-environment gen2 --env-vars-file .env
+gcloud run deploy myaura --source . --region europe-west1 --platform managed --allow-unauthenticated --memory 4Gi --cpu 2 --concurrency 80 --max-instances 3 --min-instances 0 --timeout 600 --no-cpu-throttling --execution-environment gen2

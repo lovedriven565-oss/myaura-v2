@@ -1,0 +1,43 @@
+# Explicit gcloudignore — prevents gcloud run deploy from falling back to .gitignore
+# and accidentally excluding build-critical files.
+
+node_modules/
+dist/
+build/
+coverage/
+
+.env
+.env.local
+.env.*.local
+
+.git/
+.gitignore
+.vscode/
+.idea/
+
+*.log
+tmp/
+temp/
+*.tmp
+
+.DS_Store
+Thumbs.db
+
+# Documentation and scripts not needed in container
+*.md
+DEPLOY*.md
+scripts/
+migrations/
+supabase/
+
+# Local diagnostic dumps (may contain tokens)
+adc_token.txt
+curl_verbose.txt
+*.iam.json
+iam_policy.json
+model_detail.json
+models.json
+models_list.json
+models_list_v2.json
+pub_models.json
+scripts/out.json
