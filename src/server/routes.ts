@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "./db.js";
+import { enqueueGenerationTask } from "./tasks.js";
 import { storage } from "./storage.js";
 import { aiProvider, ImageRef } from "./ai.js";
 import { buildFreePrompt, buildPremiumPrompt, StyleId, AgeTier, Gender } from "./prompts.js";
@@ -29,7 +30,9 @@ import {
 import { z } from "zod";
 import crypto from "crypto";
 
-export const apiRouter = Router();
+export import { generateGcsUploadUrl } from "./gcs.js";
+
+const apiRouter = Router();
 
 // ─── Telegram initData Validation (Security) ─────────────────────────────────
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
@@ -604,7 +607,7 @@ apiRouter.post(
         });
       }
 
-      // Mint presigned URLs in parallel — R2 signing is CPU-only, no I/O
+      // Mint presigned URLs in parallel — GCS signing is fast and CPU-bound
       const slots = await Promise.all(
         body.files.map(async file => {
           const key = buildUploadKey(
@@ -612,7 +615,8 @@ apiRouter.post(
             uuidv4(),
             file.contentType as AllowedUploadContentType
           );
-          return storage.presignPut(key, file.contentType, file.size, PRESIGN_TTL_SEC);
+          // 15 mins = PRESIGN_TTL_SEC / 60
+          return generateGcsUploadUrl(key, file.contentType, PRESIGN_TTL_SEC / 60);
         })
       );
 
@@ -961,341 +965,16 @@ apiRouter.post("/generate",
     // Return immediately, process in background
     res.json({ id, status: "processing" });
 
-    // Background processing
-    // Cloud Run lifecycle: register this generation so the SIGTERM handler
-    // can log/await it before the instance is reaped. The watchdog still
-    // reclaims + refunds any zombie left behind by a hard SIGKILL.
-    markGenerationStart(id);
-    if (isShuttingDown()) {
-      console.warn(`[${id}] WARNING: instance is shutting down — background work may be killed before completion. Watchdog will refund.`);
-    }
-
-    // ── V9.0 PREMIUM TIER (Tuning Initiation) ──
-    if (mode === "premium") {
-      try {
-        console.log(`[${id}] PREMIUM MODE: Starting V9.0 Vertex AI Subject Tuning Job`);
-        
-        const chatTarget = telegramChatId || telegramUserId;
-        if (chatTarget) {
-          sendTelegramStatus(chatTarget, "💎 Анализируем ваши фото и запускаем создание уникальной нейросети (LoRA). Это займет около 15-30 минут. Мы пришлем уведомление, когда ваши премиум-фото будут готовы!").catch(() => {});
-        }
-        
-        const refs: ImageRef[] = imageFiles.map(file => ({
-          base64: file.buffer.toString("base64"),
-          mimeType: file.mimetype,
-        }));
-        
-        // Call Phase 1 with the critical generationId context
-        await aiProvider.generatePremiumTier(refs, "", profile, "business", 0, id);
-        
-        console.log(`[${id}] PREMIUM MODE: Tuning Job started successfully. Awaiting Watchdog (Phase 2).`);
-      } catch (err: any) {
-        // Domain-Driven Error Logging
-        console.error(`\n[🚨 V9.0 Tuning Error] Ошибка инициализации датасета для генерации ${id}:`);
-        console.error(`   Причина: ${err.message || String(err)}`);
-        console.error(`   Потерян ли контекст? generationId=${id}`);
-        console.error(`   Trace: ${err.stack}\n`);
-        
-        const errMsg = err.message || String(err);
-        await db.from("generations").update({
-          status: "failed",
-          error_message: `Failed to start tuning job: ${errMsg}`
-        }).eq("id", id);
-        
-        const chatTarget = telegramChatId || telegramUserId;
-        if (chatTarget) {
-          sendTelegramStatus(chatTarget, "❌ Произошла ошибка при запуске обучения нейросети. Средства возвращены.").catch(() => {});
-        }
-        
-        const creditType = (req as any).creditType;
-        if (creditType && telegramUserId) {
-          await refundCredit(telegramUserId, creditType, id, `V9.0 Tuning Init Failed: ${errMsg}`).catch(e => console.error(e));
-        }
-      }
-      return; // Phase 1 is done, exit background task
-    }
-
-    // ── FREE / PREVIEW TIER (Direct Inference) ──
     try {
-      const schedule = buildStyleScheduleWithCount(config, styleIds as StyleId[], outputCount);
-      const genConfig = getGenerationConfig(config.id);
-      console.log(`[${id}] Schedule: ${schedule.length} images, concurrency=${genConfig.concurrency}, delay=${genConfig.delayMs}ms`);
-
-      // Prepare references for AI provider — all uploaded images become refs.
-      const refs: ImageRef[] = imageFiles.map(file => ({
-        base64: file.buffer.toString("base64"),
-        mimeType: file.mimetype,
-      }));
-
-      console.log(`[${id}] SESSION: userId=${telegramUserId}, refs=${refs.length}, mode=${mode}`);
-
-      // Progressive state tracking
-      let completedCount = 0;
-      let failedCount = 0;
-      const successPaths: string[] = [];
-      const errors: string[] = [];
-      // v3.6: Track which schedule indices failed so we can run a rescue pass
-      // after the main batch completes. This is the primary guarantee
-      // mechanism for "full pack delivery" — see rescue block below.
-      const failedIndices: number[] = [];
-      let dbUpdateChain = Promise.resolve();
-
-      // Interim status updates to Telegram
-      const chatTarget = telegramChatId || telegramUserId;
-      if (chatTarget) {
-        sendTelegramStatus(chatTarget, "🎨 Анализируем ваш запрос...").catch(() => {});
-        setTimeout(() => {
-          sendTelegramStatus(chatTarget, "✨ Создаём вашу уникальную ауру...").catch(() => {});
-        }, 2500);
-        setTimeout(() => {
-          sendTelegramStatus(chatTarget, "🌟 Применяем финальные штрихи...").catch(() => {});
-        }, 6000);
-      }
-
-      // Task for generating a single image. Routes cleanly to the V6.0
-      // tier method based on the request mode — no fallback branching here,
-      // that lives in ai.ts.
-      const VALID_STYLES: StyleId[] = [
-        "business", "lifestyle", "aura", "cinematic", "luxury", "editorial",
-        "cyberpunk", "corporate", "ethereal",
-      ];
-
-      const generateOne = async (styleId: StyleId, index: number): Promise<string> => {
-        const validStyleId: StyleId = (styleId && VALID_STYLES.includes(styleId)) ? styleId : "business";
-        if (validStyleId !== styleId) {
-          console.warn(`[${id}] Image ${index}: Invalid styleId "${styleId}", falling back to business`);
-        }
-
-        const prompt = buildFreePrompt(validStyleId, index, profile);
-
-        console.log(
-          `[${id}] Image ${index}: tier=${mode} style=${validStyleId} ` +
-          `profile=${profile.gender}/${profile.ageTier}/${profile.skinTone}/${profile.hairColor}`
-        );
-
-        const resultBase64 = await aiProvider.generateFreeTier(refs, prompt);
-
-        const resultBuffer = Buffer.from(resultBase64, "base64");
-        const resultPath = await storage.save(resultBuffer, `${id}_result_${index}.jpg`, "result");
-        return resultPath;
-      };
-
-      // Progressive callback — fires after each image finishes (success or fail)
-      const onItemComplete = (index: number, result: PromiseSettledResult<string>) => {
-        if (result.status === "fulfilled") {
-          completedCount++;
-          successPaths.push(result.value);
-          console.log(`[${id}] Image ${index + 1}/${schedule.length} completed (${completedCount} done)`);
-        } else {
-          failedCount++;
-          failedIndices.push(index);
-          const errMsg = result.reason?.message || String(result.reason) || "Unknown error";
-          errors.push(errMsg);
-          console.error(`╔═══ [${id}] IMAGE ${index + 1}/${schedule.length} FAILED ═══╗`);
-          console.error(`  Reason : ${errMsg}`);
-          console.error(`  Stack  : ${result.reason?.stack || "no stack available"}`);
-          console.error(`╚${"═".repeat(50)}╝`);
-        }
-
-        // Chain DB updates sequentially to avoid race conditions.
-        // Also bump last_heartbeat_at so the watchdog does not reclaim
-        // a legitimately-long-running batch (e.g. Max package, 60 images).
-        dbUpdateChain = dbUpdateChain.then(() =>
-          db.from("generations").update({
-            results_completed: completedCount,
-            results_failed: failedCount,
-            result_path: successPaths[0] || null,
-            result_paths: [...successPaths],
-            last_heartbeat_at: new Date().toISOString(),
-          }).eq("id", id).then(() => {})
-        ).catch(err => console.error("Progressive DB update error:", err));
-
-        // Fire-and-forget explicit RPC heartbeat (cheaper than a full UPDATE,
-        // and serves as a backup in case the chained UPDATE above is queued).
-        updateGenerationHeartbeat(id).catch(() => { /* already logged inside */ });
-      };
-
-      // Run generation using env-configured concurrency and delay (PREMIUM_CONCURRENCY, INTER_REQUEST_DELAY_MS)
-      await runBatched(schedule, generateOne, {
-        concurrency: genConfig.concurrency,
-        delayMs: genConfig.delayMs,
-        onItemComplete,
-      });
-
-      // Wait for any pending DB updates to flush
-      await dbUpdateChain;
-
-      // ─── v3.6 Rescue Pass ─────────────────────────────────────────────
-      // Goal: guarantee the user receives the FULL pack they paid for, even
-      // under the heavy latency of gemini-3-pro-image-preview (4-6 min/img).
-      //
-      // Why this is safe:
-      //   - Runs through generationQueue, so it respects the global 6s
-      //     inter-request spacing and never thunders the Vertex endpoint.
-      //   - ai.ts already wraps each model call in withNetworkRetry (3×),
-      //     so by the time we reach here a failure is either: a persistent
-      //     upstream issue (rescue will also fail → we surface it), or a
-      //     transient issue whose next window happens to be clear (rescue
-      //     succeeds → user gets their photo).
-      //   - We cap at 1 rescue attempt per image to avoid runaway loops
-      //     on malformed prompts/refs.
-      //   - Each rescue success triggers progressive Telegram delivery so
-      //     the user sees photos trickle in rather than a delayed flood.
-      if (failedIndices.length > 0) {
-        const toRescue = [...failedIndices];
-        console.log(`[${id}] Rescue pass: re-running ${toRescue.length} failed image(s) | ` +
-          `currently ${completedCount}/${schedule.length} done`);
-        for (const idx of toRescue) {
-          const styleId = schedule[idx];
-          try {
-            const resultPath = await generationQueue.add(() => generateOne(styleId, idx)) as string;
-            // Mutate counters (same invariants as onItemComplete fulfilled branch)
-            completedCount++;
-            failedCount = Math.max(0, failedCount - 1);
-            successPaths.push(resultPath);
-            // Drop this index from failedIndices bookkeeping
-            const fiPos = failedIndices.indexOf(idx);
-            if (fiPos >= 0) failedIndices.splice(fiPos, 1);
-            console.log(`[${id}] Rescue ✓ image ${idx + 1}/${schedule.length} recovered ` +
-              `(${completedCount}/${schedule.length} done)`);
-
-            // Progressive DB heartbeat so the watchdog doesn't reclaim us
-            // mid-rescue and so the frontend /status poll sees progress.
-            await db.from("generations").update({
-              results_completed: completedCount,
-              results_failed: failedCount,
-              result_path: successPaths[0] || null,
-              result_paths: [...successPaths],
-              last_heartbeat_at: new Date().toISOString(),
-            }).eq("id", id);
-          } catch (rescueErr: any) {
-            const rescueMsg = rescueErr?.message || String(rescueErr) || "Unknown rescue error";
-            errors.push(`[rescue] ${rescueMsg}`);
-            console.error(`[${id}] Rescue ✗ image ${idx + 1}/${schedule.length} still failed: ` +
-              rescueMsg.slice(0, 200));
-          }
-        }
-        console.log(`[${id}] Rescue pass done: ${completedCount}/${schedule.length} total | ` +
-          `${failedIndices.length} still failed`);
-      }
-      // ─── End Rescue Pass ─────────────────────────────────────────────
-
-      // Determine final status
-      // completed = all succeeded, partial = some succeeded, failed = none succeeded
-      const finalStatus = completedCount === 0
-        ? "failed"
-        : completedCount < schedule.length ? "partial" : "completed";
-      const finalErrorMsg = errors.length > 0 ? errors.join("; ") : null;
-
-      await db
-        .from("generations")
-        .update({
-          status: finalStatus,
-          result_path: successPaths[0] || null,
-          result_paths: successPaths,
-          results_completed: completedCount,
-          results_failed: failedCount,
-          error_message: finalErrorMsg,
-        })
-        .eq("id", id);
-
-      console.log(`[${id}] Done: status=${finalStatus}, completed=${completedCount}, failed=${failedCount}`);
-
-      // Cleanup quality gate reroll tracking
-      clearRerollTracking(id);
-
-      // Delete original reference photos from R2 (biometric data retention hygiene)
-      try {
-        await Promise.all(originalPaths.map(p => storage.delete(p)));
-        console.log(`[${id}] Cleaned up ${originalPaths.length} original file(s) from R2`);
-      } catch (cleanupErr: any) {
-        console.error(`[${id}] R2 cleanup error: ${cleanupErr.message}`);
-      }
-
-      // Referral award: fire after first completed free generation
-      if (finalStatus === "completed" && telegramUserId) {
-        tryAwardReferral(telegramUserId, id).catch(() => {}); // errors are logged inside
-      }
-
-      // Final Telegram delivery: only for free/preview (1 image).
-      let deliveryFailed = false;
-      if (completedCount > 0) {
-        const targetChatId = telegramChatId || telegramUserId;
-        if (targetChatId) {
-          // Fetch (or mint) the user's referral_code so the delivery carries a share button.
-          let referralCode: string | null = null;
-          if (telegramUserId) {
-            try {
-              const { data: refRow } = await getDb()
-                .rpc("ensure_referral_code", { p_telegram_id: telegramUserId });
-              referralCode = refRow ?? null;
-            } catch (refErr: any) {
-              console.warn(`[${id}] ensure_referral_code failed: ${refErr?.message || refErr}`);
-            }
-          }
-          try {
-            // Mode is narrowed to "preview" by the outer guard, so tier is always "free" here.
-            await deliverTelegramResults(targetChatId, successPaths, referralCode, "free");
-            console.log(`[${id}] Telegram delivery successful`);
-          } catch (deliveryErr: any) {
-            deliveryFailed = true;
-            console.error(`[${id}] Telegram delivery failed:`, deliveryErr);
-            // Refund credit if delivery failed - user didn't receive their photo
-            if ((req as any).creditType && telegramUserId) {
-              const refunded = await refundCredit(
-                telegramUserId,
-                (req as any).creditType,
-                id,
-                `Telegram delivery failed: ${deliveryErr.message}`
-              );
-              if (refunded) {
-                console.log(`[${id}] Credit refunded due to Telegram delivery failure`);
-              }
-            }
-          }
-        }
-      }
-
-      // REFUND LOGIC: If generation completely failed (0 completed), refund credit
-      const creditType = (req as any).creditType;
-      if (completedCount === 0 && creditType && telegramUserId && !deliveryFailed) {
-        const refunded = await refundCredit(
-          telegramUserId,
-          creditType,
-          id,
-          `Generation failed: ${finalErrorMsg || 'All images failed to generate'}`
-        );
-        if (refunded) {
-          console.log(`[${id}] Credit refunded due to complete generation failure`);
-        }
-      }
-
-    } catch (genError: any) {
-      console.error("Generation batch failed:", genError);
-      await db
-        .from("generations")
-        .update({ status: "failed", error_message: genError.message })
-        .eq("id", id);
-      
-      // REFUND: Critical error during generation - always refund
+      await enqueueGenerationTask(id, String(telegramUserId), mode);
+    } catch (enqueueErr) {
+      console.error(`[${id}] Failed to enqueue task:`, enqueueErr);
+      // Refund on enqueue failure
       const creditType = (req as any).creditType;
       if (creditType && telegramUserId) {
-        try {
-          const refunded = await refundCredit(
-            telegramUserId,
-            creditType,
-            id,
-            `Critical generation error: ${genError.message}`
-          );
-          if (refunded) {
-            console.log(`[${id}] Credit refunded due to critical error`);
-          }
-        } catch (refundErr: any) {
-          console.error(`[${id}] Failed to refund after critical error:`, refundErr);
-        }
+        await refundCredit(telegramUserId, creditType, id, "enqueue_failed").catch(e => console.error(e));
       }
-    } finally {
-      markGenerationEnd(id);
+      await db.from("generations").update({ status: "failed", error_message: "Failed to queue task" }).eq("id", id);
     }
   } catch (error: any) {
     // Guard against "Cannot set headers after they are sent" — we already

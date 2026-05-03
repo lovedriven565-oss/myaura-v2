@@ -249,16 +249,16 @@ export interface AuditGateResult {
 export function evaluateAuditGate(
   audit: PreflightAudit,
   tier: "free" | "premium",
-  telegramUserId?: number // Added for testing/bypass logic
+  isAdmin: boolean = false
 ): AuditGateResult {
   const totalCount = audit.perImage.length;
   const usable = audit.perImage.filter(p => p.usable);
   const usableCount = usable.length;
 
-  // ── V9.0 God Mode Bypass ──
-  // Automatically passes audit for the dev test account regardless of quality.
-  if (telegramUserId && telegramUserId === parseInt(process.env.TEST_ACCOUNT_ID || "0", 10)) {
-    console.warn(`[Audit] 🚨 GOD MODE BYPASS ACTIVATED for user ${telegramUserId}. usable=${usableCount}/${totalCount}`);
+  // ── V2.0 Admin Bypass ──
+  // Automatically passes audit for admin accounts regardless of quality.
+  if (isAdmin) {
+    console.warn(`[Audit] 🚨 ADMIN BYPASS ACTIVATED. usable=${usableCount}/${totalCount}`);
     return { pass: true, usableCount: totalCount, totalCount, rejectedReasons: [] };
   }
 

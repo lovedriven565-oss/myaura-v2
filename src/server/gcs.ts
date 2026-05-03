@@ -1,109 +1,56 @@
 import { Storage } from "@google-cloud/storage";
-import { ImageRef } from "./ai.js";
 
 // Uses ADC (Application Default Credentials) or GOOGLE_APPLICATION_CREDENTIALS
 const storage = new Storage();
 
-// We need a bucket for the tuning datasets
-// Defaulting to "myaura-vertex-tuning" but can be overridden in env
-export const TUNING_BUCKET_NAME = process.env.VERTEX_TUNING_BUCKET || "myaura-vertex-tuning";
+// Bucket for ingesting user reference images directly to GCS via Signed URLs
+export const INGESTION_BUCKET = process.env.INGESTION_BUCKET || "myaura-ingestion";
 
 /**
- * Uploads user reference images to GCS for Vertex AI Subject Tuning.
- * 
- * @param generationId The unique ID of the generation (used as folder name).
- * @param refs Array of ImageRef (base64 + mimeType).
- * @returns The GCS URI of the uploaded dataset folder (e.g. gs://bucket/folder/)
+ * Generates a V4 Signed URL for uploading an object directly to GCS.
+ * Used to bypass the server and avoid R2/GCS protocol mismatch.
  */
-export async function uploadTuningDataset(generationId: string, refs: ImageRef[]): Promise<string> {
-  const bucket = storage.bucket(TUNING_BUCKET_NAME);
-  
-  // Ensure bucket exists (or at least log if we suspect it doesn't)
-  // In a real prod environment we assume terraform/operator created it.
-  
-  const gcsFolder = `datasets/${generationId}/`;
-  
-  const uploadPromises = refs.map(async (ref, index) => {
-    // Generate a file extension based on mimeType
-    let ext = "jpg";
-    if (ref.mimeType.includes("png")) ext = "png";
-    else if (ref.mimeType.includes("webp")) ext = "webp";
-    else if (ref.mimeType.includes("heic")) ext = "heic";
+export async function generateGcsUploadUrl(key: string, contentType: string, expiresInMinutes: number = 15): Promise<string> {
+  const bucket = storage.bucket(INGESTION_BUCKET);
+  const file = bucket.file(key);
 
-    const fileName = `${gcsFolder}ref_${index}.${ext}`;
-    const file = bucket.file(fileName);
-    
-    const buffer = Buffer.from(ref.base64, "base64");
-    
-    await file.save(buffer, {
-      contentType: ref.mimeType,
-      resumable: false, // For small images, non-resumable is faster
-    });
+  const [url] = await file.getSignedUrl({
+    version: "v4",
+    action: "write",
+    expires: Date.now() + expiresInMinutes * 60 * 1000,
+    contentType,
   });
 
-  await Promise.all(uploadPromises);
-  
-  // Vertex AI TuningJob expects trainingDatasetUri to be a JSONL file,
-  // not a folder. Build a JSONL manifest that references each uploaded image.
-  const jsonlLines = refs.map((ref, index) => {
-    let ext = "jpg";
-    if (ref.mimeType.includes("png")) ext = "png";
-    else if (ref.mimeType.includes("webp")) ext = "webp";
-    else if (ref.mimeType.includes("heic")) ext = "heic";
-
-    const imageUri = `gs://${TUNING_BUCKET_NAME}/${gcsFolder}ref_${index}.${ext}`;
-
-    // Use Vertex AI multimodal tuning JSONL format (image + text pair)
-    const record = {
-      contents: [
-        {
-          role: "user",
-          parts: [
-            { text: `Portrait of a person, reference photo ${index + 1}` },
-            {
-              fileData: {
-                mimeType: ref.mimeType,
-                fileUri: imageUri,
-              },
-            },
-          ],
-        },
-      ],
-    };
-
-    return JSON.stringify(record);
-  });
-
-  const jsonlContent = jsonlLines.join("\n");
-  const jsonlFileName = `${gcsFolder}dataset.jsonl`;
-  const jsonlFile = bucket.file(jsonlFileName);
-
-  await jsonlFile.save(jsonlContent, {
-    contentType: "application/jsonl",
-    resumable: false,
-  });
-
-  const jsonlUri = `gs://${TUNING_BUCKET_NAME}/${jsonlFileName}`;
-  
-  console.log(`[GCS] Uploaded ${refs.length} images + dataset.jsonl to gs://${TUNING_BUCKET_NAME}/${gcsFolder}`);
-  
-  return jsonlUri;
+  return url;
 }
 
 /**
- * Deletes the tuning dataset for a given generation to save storage costs.
+ * Validates if an object exists and is within limits in GCS.
  */
-export async function deleteTuningDataset(generationId: string): Promise<void> {
+export async function headGcsObject(key: string): Promise<{ exists: boolean; size?: number; contentType?: string }> {
   try {
-    const bucket = storage.bucket(TUNING_BUCKET_NAME);
-    const prefix = `datasets/${generationId}/`;
-    
-    console.log(`[GCS] Deleting dataset: gs://${TUNING_BUCKET_NAME}/${prefix}`);
-    
-    await bucket.deleteFiles({ prefix });
-    
-    console.log(`[GCS] Successfully deleted dataset for generation ${generationId}`);
+    const [metadata] = await storage.bucket(INGESTION_BUCKET).file(key).getMetadata();
+    return {
+      exists: true,
+      size: parseInt(metadata.size as string, 10),
+      contentType: metadata.contentType,
+    };
   } catch (err: any) {
-    console.error(`[GCS] Error deleting dataset for generation ${generationId}:`, err);
+    if (err.code === 404) return { exists: false };
+    throw err;
   }
+}
+
+/**
+ * Immediately deletes the specified keys from GCS for GDPR compliance.
+ */
+export async function deleteFromGcs(keys: string[]): Promise<void> {
+  const bucket = storage.bucket(INGESTION_BUCKET);
+  const deletePromises = keys.map(key => 
+    bucket.file(key).delete({ ignoreNotFound: true }).catch(err => {
+      console.error(`[GCS] Failed to delete ${key}:`, err.message);
+    })
+  );
+  await Promise.all(deletePromises);
+  console.log(`[GCS] GDPR Cleanup: Deleted ${keys.length} original files from bucket ${INGESTION_BUCKET}`);
 }

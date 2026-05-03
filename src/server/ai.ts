@@ -52,8 +52,8 @@ import type { StyleId } from "./prompts.js";
 // ─── Public Interface ───────────────────────────────────────────────────────
 
 export interface ImageRef {
-  /** Base64-encoded image bytes (no data:; prefix). */
-  base64: string;
+  /** GCS URI to the image (gs://bucket/path) */
+  gcsUri: string;
   /** MIME type, e.g. "image/jpeg" / "image/png" / "image/webp". */
   mimeType: string;
 }
@@ -66,22 +66,7 @@ export interface IGenerationProvider {
   generateFreeTier(refs: ImageRef[], prompt: string): Promise<string>;
 
   /**
-   * PREMIUM tier. 10-15 refs → 1 output. Background async (V8.0).
-   *
-   * Primary: imagen-3.0-capability-001 Subject Customization (us-central1)
-   *          via models.editImage() — this is Google's LoRA-equivalent for
-   *          face identity preservation and produces dramatically better
-   *          likeness than the Gemini image models.
-   * Fallback 1: gemini-3-pro-image-preview (global)         ← higher quality
-   * Fallback 2: gemini-3.1-flash-image-preview (global)     ← always available
-   *
-   * Caller supplies `styleId`/`index` so we can build the Imagen-flavoured
-   * prompt internally (with `[1]` markers required by Subject Customization).
-   * The Gemini-flavoured `fallbackPrompt` is what gets used when the
-   * primary path fails — it is built externally by `buildPremiumPrompt`.
-   *
-   * `profile` MUST be provided for Imagen 3 (it drives subjectDescription).
-   * If null, we skip Imagen and go straight to the Gemini fallback chain.
+   * PREMIUM tier. 10-15 refs → 1 output.
    */
   generatePremiumTier(
     refs: ImageRef[],
@@ -93,17 +78,9 @@ export interface IGenerationProvider {
   ): Promise<string>;
 
   /**
-   * Preflight biometric audit. Runs BEFORE credit consumption to catch bad
-   * uploads (sunglasses, blur, multi-people, no face) and to extract a
-   * structured biometric fingerprint that anchors identity through the rest
-   * of the pipeline. One Gemini 2.5 Flash call, all refs batched.
+   * Preflight biometric audit.
    */
   auditReferences(refs: ImageRef[]): Promise<PreflightAudit>;
-
-  // V9.0 Subject Tuning API methods
-  checkTuningJobStatus(tuningJobId: string): Promise<{ status: string; tunedModelName?: string; error?: string }>;
-  generateFromTunedModel(tunedModelName: string, prompt: string): Promise<string>;
-  deleteTunedModel(tunedModelName: string): Promise<void>;
 }
 
 // ─── Model IDs & Regions ────────────────────────────────────────────────────
@@ -393,7 +370,7 @@ export class VertexAIProvider implements IGenerationProvider {
     );
   }
 
-  // ═════ PREMIUM TIER (V9.0: GCS Dataset + Vertex AI TuningJob) ══════════════
+  // ═════ PREMIUM TIER (V2.0: Event-Driven Cloud Tasks) ══════════════
   async generatePremiumTier(
     refs: ImageRef[],
     fallbackPrompt: string,
@@ -403,82 +380,16 @@ export class VertexAIProvider implements IGenerationProvider {
     generationId?: string,
   ): Promise<string> {
     if (!refs || refs.length === 0) throw new Error("generatePremiumTier: refs[] required");
-    if (!generationId) throw new Error("generatePremiumTier: generationId required for V9.0 Tuning Job");
 
-    const label = "PREMIUM.tuning";
-    console.log(`[${label}] generationId=${generationId} refs=${refs.length} profile=${profile?.gender}/${profile?.ageTier}`);
+    // We no longer build an Imagen 3 prompt with [1] placeholders.
+    // fallbackPrompt is the pure Gemini prompt built externally, which incorporates biometric anchors.
+    console.log(`[PREMIUM.pro] refs=${refs.length} | region=${PRO_LOCATION}`);
 
-    // Step 1: Upload all references to GCS for the tuning dataset
-    const gcsUri = await uploadTuningDataset(generationId, refs);
-    
-    // Step 2: Call Vertex AI TuningJob API
-    const slot = await getNextSlot();
-    const projectId = slot.isAdc ? VERTEX_ADC_PROJECT : slot.projectId;
-    if (!projectId) throw new Error(`[${label}] no project id resolved`);
-
-    // Using us-central1 as the primary region for Imagen tuning
-    const location = IMAGEN_LOCATION; 
-    
-    // Auth for raw REST call
-    const prevCreds = process.env.GOOGLE_APPLICATION_CREDENTIALS;
-    if (!slot.isAdc) process.env.GOOGLE_APPLICATION_CREDENTIALS = slot.keyPath;
-    const auth = new GoogleAuth({
-      scopes: ["https://www.googleapis.com/auth/cloud-platform"],
-    });
-    const accessTokenObj = await auth.getAccessToken();
-    const accessToken = typeof accessTokenObj === "string" ? accessTokenObj : (accessTokenObj as any)?.token;
-    if (prevCreds !== undefined) process.env.GOOGLE_APPLICATION_CREDENTIALS = prevCreds;
-    else if (!slot.isAdc) delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
-    
-    if (!accessToken) throw new Error(`[${label}] failed to obtain access token`);
-
-    const url = `https://${location}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/tuningJobs`;
-    
-    // V9.0 TuningJob payload for Imagen Subject Customization
-    const outputUri = `gs://${TUNING_BUCKET_NAME}/tuned_models/${generationId}/`;
-    const payload = {
-      baseModel: `publishers/google/models/imagen-3.0-generate-001@001`,
-      supervisedTuningSpec: {
-        trainingDatasetUri: gcsUri,
-        outputUri: outputUri,
-      }
-    };
-
-    console.log(`[${label}] Starting tuning job on Vertex AI: ${url}`);
-    
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json; charset=utf-8",
-      },
-      body: JSON.stringify(payload),
-    });
-
-    if (!response.ok) {
-      const bodyText = await response.text().catch(() => "<unreadable>");
-      console.error(`[${label}] Tuning Job failed to start:`, bodyText);
-      throw new Error(`[${label}] HTTP ${response.status}: ${bodyText.slice(0, 300)}`);
-    }
-
-    const data: any = await response.json();
-    const tuningJobId = data.name; // e.g., projects/123/locations/us-central1/tuningJobs/456
-    
-    console.log(`[${label}] Tuning Job started successfully: ${tuningJobId}`);
-
-    // Step 3: Update Supabase with the tuning_job_id and pending status
-    const db = getDb();
-    const { error: dbErr } = await db.from("generations").update({
-      tuning_job_id: tuningJobId,
-      tuning_status: "pending"
-    }).eq("id", generationId);
-
-    if (dbErr) {
-      console.error(`[${label}] Failed to update DB with tuning_job_id:`, dbErr);
-      throw new Error(`Failed to save tuning job state: ${dbErr.message}`);
-    }
-
-    return "job_started"; // Returning dummy string since we bypassed generateOne loop
+    // Call Gemini 3 Pro Image (or equivalent) using fileData.
+    return withRateLimitRetry(
+      () => this._callGeminiImage(PRO_MODEL, PRO_LOCATION, PRO_CALL_TIMEOUT_MS, refs, fallbackPrompt, 0.4, 0.95, "PREMIUM.pro"),
+      "PREMIUM.pro",
+    );
   }
 
   // ═════ AUDIT ═════════════════════════════════════════════════════════════
@@ -489,192 +400,6 @@ export class VertexAIProvider implements IGenerationProvider {
       () => this._callJudgeJSON(refs, AUDIT_PROMPT),
       "AUDIT.judge",
     );
-  }
-
-  // ─── Imagen 3 Subject Customization (V8.1 — raw REST predict) ──────────
-  /**
-   * V8.1 — Raw `predict` REST call, bypassing the @google/genai SDK.
-   *
-   * Why raw REST instead of SDK editImage():
-   *   - The SDK's `editImage()` does NOT propagate `guidanceScale` into the
-   *     final HTTP `instances.parameters` — observed in production logs.
-   *     Without CFG control, Imagen 3 defaults to its baseline guidance and
-   *     refuses to lock the reference identity tightly.
-   *   - The SDK at certain versions also injected `controlImageConfig` with
-   *     CONTROL_TYPE_FACE_MESH automatically, which Vertex either rejects
-   *     (400) or interprets as a hybrid Customization+Control payload that
-   *     breaks identity preservation. We need a *minimal* Subject-only
-   *     payload, end of story.
-   *
-   * Payload shape (per Vertex AI v1 publishers/google/models/imagen-3.0-
-   * capability-001:predict):
-   *   {
-   *     instances: [{
-   *       prompt: "...[1]...",
-   *       referenceImages: [{
-   *         referenceType: "REFERENCE_TYPE_SUBJECT",
-   *         referenceId: 1,
-   *         referenceImage: { bytesBase64Encoded, mimeType },
-   *         subjectImageConfig: {
-   *           subjectType: "SUBJECT_TYPE_PERSON",
-   *           subjectDescription: "the exact person shown in the reference images"
-   *         }
-   *       }, ...]
-   *     }],
-   *     parameters: {
-   *       sampleCount: 1,
-   *       aspectRatio: "3:4",
-   *       guidanceScale: 5.0,
-   *       personGeneration: "allow_all",
-   *       negativePrompt: "...",
-   *       safetySetting: "block_only_high",
-   *       includeRaiReason: true,
-   *       language: "en"
-   *     }
-   *   }
-   *
-   * Notes:
-   *   - Imagen 3 Subject Customization allows max 2 refs for non-square
-   *     aspect ratios. Audit ranks refs by quality so refs[0..1] are used.
-   *   - All subject refs share `referenceId: 1` — multi-view of the SAME person.
-   *   - A 3rd ref (`referenceId: 2`) with CONTROL_TYPE_FACE_MESH locks
-   *     facial geometry to the best audit-ranked photo (Google-recommended).
-   *   - `guidanceScale: 7.0` strengthens visual-embedding adherence vs text.
-   */
-  private async _callImagen3SubjectCustomization(
-    refs: ImageRef[],
-    profile: SubjectProfile,
-    styleId: StyleId,
-    index: number,
-  ): Promise<string> {
-    const slot = await getNextSlot();
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), IMAGEN_CALL_TIMEOUT_MS);
-    const label = "PREMIUM.imagen";
-
-    try {
-      const { prompt, subjectDescription } = buildPremiumImagenPrompt(styleId, index, profile);
-
-      // Imagen 3 Subject Customization allows max 2 refs for non-square
-      // aspect ratios (e.g. 3:4, 9:16). Audit already ranked refs by quality.
-      const usableRefs = refs.slice(0, 2);
-
-      const subjectImages = usableRefs.map((r, i) => ({
-        referenceType: "REFERENCE_TYPE_SUBJECT",
-        referenceId: 1,  // ALL refs share id=1 → "same person, multi-view"
-        referenceImage: {
-          bytesBase64Encoded: r.base64,
-          mimeType: r.mimeType,
-        },
-        subjectImageConfig: {
-          subjectType: "SUBJECT_TYPE_PERSON",
-          subjectDescription,
-        },
-        _viewIndex: i,  // stripped before send; only for log clarity
-      })).map(({ _viewIndex: _, ...keep }) => keep);
-
-      const referenceImages = subjectImages;
-
-      const payload = {
-        instances: [{
-          prompt,
-          referenceImages,
-        }],
-        parameters: {
-          sampleCount: 1,
-          aspectRatio: "3:4",
-          guidanceScale: 4.0,
-          personGeneration: "allow_all",
-          negativePrompt: NEGATIVE_PROMPT,
-          safetySetting: "block_only_high",
-          includeRaiReason: true,
-          language: "en",
-        },
-      };
-
-      // Auth: GoogleAuth honours GOOGLE_APPLICATION_CREDENTIALS (set per-slot
-      // for JSON keys) and falls back to ADC otherwise.
-      const prevCreds = process.env.GOOGLE_APPLICATION_CREDENTIALS;
-      if (!slot.isAdc) process.env.GOOGLE_APPLICATION_CREDENTIALS = slot.keyPath;
-      const auth = new GoogleAuth({
-        scopes: ["https://www.googleapis.com/auth/cloud-platform"],
-      });
-      const accessTokenObj = await auth.getAccessToken();
-      const accessToken = typeof accessTokenObj === "string"
-        ? accessTokenObj
-        : (accessTokenObj as any)?.token;
-      if (prevCreds !== undefined) process.env.GOOGLE_APPLICATION_CREDENTIALS = prevCreds;
-      else if (!slot.isAdc) delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
-      if (!accessToken) throw new Error(`[${label}] failed to obtain access token`);
-
-      const projectId = slot.isAdc ? VERTEX_ADC_PROJECT : slot.projectId;
-      if (!projectId) throw new Error(`[${label}] no project id resolved`);
-
-      const url =
-        `https://${IMAGEN_LOCATION}-aiplatform.googleapis.com/${IMAGEN_API_VERSION}/projects/${projectId}` +
-        `/locations/${IMAGEN_LOCATION}/publishers/google/models/${IMAGEN_MODEL}:predict`;
-
-      console.log(
-        `[${label}] model=${IMAGEN_MODEL} refs=${referenceImages.length}/${refs.length} ` +
-        `(subj=${subjectImages.length}) cfg=${payload.parameters.guidanceScale} ` +
-        `desc="${subjectDescription}" prompt[0..160]="${prompt.slice(0, 160)}"`
-      );
-
-      const response = await fetch(url, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json; charset=utf-8",
-        },
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        const bodyText = await response.text().catch(() => "<unreadable>");
-        const err: any = new Error(
-          `[${label}] HTTP ${response.status}: ${bodyText.slice(0, 500)}`
-        );
-        err.status = response.status;
-        err.responseBody = bodyText;
-        throw err;
-      }
-
-      const json: any = await response.json();
-      const predictions: any[] = json?.predictions || [];
-      if (predictions.length === 0) {
-        throw new Error(`[${label}] response had no predictions`);
-      }
-
-      // Imagen 3 returns either bytesBase64Encoded (preferred) or imageBytes.
-      const first = predictions[0];
-      const imageBytes: string | undefined =
-        first?.bytesBase64Encoded || first?.imageBytes;
-      if (!imageBytes) {
-        const raiReason = first?.raiFilteredReason;
-        if (raiReason) {
-          throw Object.assign(new Error(`[${label}] safety filter: ${raiReason}`), {
-            isSafetyBlock: true,
-          });
-        }
-        throw new Error(
-          `[${label}] no image bytes in prediction (keys=${Object.keys(first || {}).join(",")})`
-        );
-      }
-      return imageBytes;
-    } catch (err: any) {
-      clearTimeout(timeoutId);
-      this._classifyAndCooldown(slot, err, label);
-      if (controller.signal.aborted) {
-        throw Object.assign(
-          new Error(`[${label}] timeout after ${IMAGEN_CALL_TIMEOUT_MS}ms`),
-          { isTimeout: true },
-        );
-      }
-      throw err;
-    }
   }
 
   // ─── Gemini Image Generation (shared by free, premium fallback, and free) ──
@@ -697,7 +422,7 @@ export class VertexAIProvider implements IGenerationProvider {
 
       // Multimodal payload: image parts first, then text prompt.
       const contents: any[] = refs.map(r => ({
-        inlineData: { data: r.base64, mimeType: r.mimeType },
+        fileData: { fileUri: r.gcsUri, mimeType: r.mimeType },
       }));
       contents.push({ text: prompt });
 
@@ -710,6 +435,8 @@ export class VertexAIProvider implements IGenerationProvider {
           safetySettings: SAFETY_SETTINGS,
           temperature,
           topP,
+          // Explicitly allow generating humans (prevents safety filter issues)
+          personGeneration: "allow_adult",
         },
       } as any);
 
@@ -747,7 +474,7 @@ export class VertexAIProvider implements IGenerationProvider {
       const client = createClient(slot, controller.signal, FLASH_LOCATION, API_VERSION);
 
       const contents: any[] = refs.map(r => ({
-        inlineData: { data: r.base64, mimeType: r.mimeType },
+        fileData: { fileUri: r.gcsUri, mimeType: r.mimeType },
       }));
       contents.push({ text: prompt });
 
@@ -782,159 +509,6 @@ export class VertexAIProvider implements IGenerationProvider {
         );
       }
       throw err;
-    }
-  }
-
-  // ═════ V9.0 SUBJECT TUNING METADATA & INFERENCE ══════════════════════════
-  
-  async checkTuningJobStatus(tuningJobId: string): Promise<{ status: string; tunedModelName?: string; error?: string }> {
-    const label = "PREMIUM.checkTuning";
-    const slot = await getNextSlot();
-    const projectId = slot.isAdc ? VERTEX_ADC_PROJECT : slot.projectId;
-    if (!projectId) throw new Error(`[${label}] no project id resolved`);
-
-    // e.g., tuningJobId = projects/123/locations/us-central1/tuningJobs/456
-    // If tuningJobId is just the ID, we could reconstruct it, but V9 returns the full resource name.
-    const url = `https://${IMAGEN_LOCATION}-aiplatform.googleapis.com/v1/${tuningJobId}`;
-    
-    // Auth for raw REST call
-    const prevCreds = process.env.GOOGLE_APPLICATION_CREDENTIALS;
-    if (!slot.isAdc) process.env.GOOGLE_APPLICATION_CREDENTIALS = slot.keyPath;
-    const auth = new GoogleAuth({ scopes: ["https://www.googleapis.com/auth/cloud-platform"] });
-    const accessTokenObj = await auth.getAccessToken();
-    const accessToken = typeof accessTokenObj === "string" ? accessTokenObj : (accessTokenObj as any)?.token;
-    if (prevCreds !== undefined) process.env.GOOGLE_APPLICATION_CREDENTIALS = prevCreds;
-    else if (!slot.isAdc) delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
-    
-    if (!accessToken) throw new Error(`[${label}] failed to obtain access token`);
-
-    const response = await fetch(url, {
-      method: "GET",
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-
-    if (!response.ok) {
-      const bodyText = await response.text().catch(() => "<unreadable>");
-      throw new Error(`[${label}] HTTP ${response.status}: ${bodyText.slice(0, 300)}`);
-    }
-
-    const data: any = await response.json();
-    const state = data.state; // e.g., "JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED", "JOB_STATE_RUNNING"
-    
-    if (state === "JOB_STATE_SUCCEEDED") {
-      return { status: "succeeded", tunedModelName: data.tunedModel?.model || data.tunedModel?.endpoint };
-    } else if (state === "JOB_STATE_FAILED") {
-      return { status: "failed", error: data.error?.message || "Unknown Vertex AI Tuning Error" };
-    } else if (state === "JOB_STATE_PENDING" || state === "JOB_STATE_RUNNING" || state === "JOB_STATE_UNSPECIFIED" || state === "JOB_STATE_QUEUED" || state === "JOB_STATE_PREPARING") {
-      return { status: "running" };
-    } else {
-      return { status: "running" }; // Treat any intermediate state as running
-    }
-  }
-
-  async generateFromTunedModel(tunedModelName: string, prompt: string): Promise<string> {
-    const label = "PREMIUM.tunedInference";
-    return await withRateLimitRetry(async () => {
-      const slot = await getNextSlot();
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), IMAGEN_CALL_TIMEOUT_MS);
-
-      try {
-        const projectId = slot.isAdc ? VERTEX_ADC_PROJECT : slot.projectId;
-        if (!projectId) throw new Error(`[${label}] no project id resolved`);
-
-        // Auth
-        const prevCreds = process.env.GOOGLE_APPLICATION_CREDENTIALS;
-        if (!slot.isAdc) process.env.GOOGLE_APPLICATION_CREDENTIALS = slot.keyPath;
-        const auth = new GoogleAuth({ scopes: ["https://www.googleapis.com/auth/cloud-platform"] });
-        const accessTokenObj = await auth.getAccessToken();
-        const accessToken = typeof accessTokenObj === "string" ? accessTokenObj : (accessTokenObj as any)?.token;
-        if (prevCreds !== undefined) process.env.GOOGLE_APPLICATION_CREDENTIALS = prevCreds;
-        else if (!slot.isAdc) delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
-        
-        if (!accessToken) throw new Error(`[${label}] failed to obtain access token`);
-
-        // tunedModelName looks like: projects/123/locations/us-central1/models/456
-        const url = `https://${IMAGEN_LOCATION}-aiplatform.googleapis.com/v1/${tunedModelName}:predict`;
-
-        const payload = {
-          instances: [{ prompt }],
-          parameters: {
-            sampleCount: 1,
-            aspectRatio: "3:4",
-            personGeneration: "allow_adult",
-            negativePrompt: NEGATIVE_PROMPT,
-            safetySetting: "block_only_high",
-            outputOptions: { mimeType: "image/jpeg" }
-          },
-        };
-
-        const response = await fetch(url, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            "Content-Type": "application/json; charset=utf-8",
-          },
-          body: JSON.stringify(payload),
-          signal: controller.signal,
-        });
-
-        clearTimeout(timeoutId);
-
-        if (!response.ok) {
-          const bodyText = await response.text().catch(() => "<unreadable>");
-          throw new Error(`[${label}] HTTP ${response.status}: ${bodyText.slice(0, 300)}`);
-        }
-
-        const json: any = await response.json();
-        const predictions: any[] = json?.predictions || [];
-        if (predictions.length === 0) throw new Error(`[${label}] response had no predictions`);
-
-        const first = predictions[0];
-        const imageBytes = first?.bytesBase64Encoded || first?.imageBytes;
-        if (!imageBytes) throw new Error(`[${label}] no image bytes in prediction`);
-        
-        return imageBytes;
-      } catch (err: any) {
-        clearTimeout(timeoutId);
-        this._classifyAndCooldown(slot, err, label);
-        if (controller.signal.aborted) {
-          throw Object.assign(new Error(`[${label}] timeout after ${IMAGEN_CALL_TIMEOUT_MS}ms`), { isTimeout: true });
-        }
-        throw err;
-      }
-    }, label);
-  }
-
-  async deleteTunedModel(tunedModelName: string): Promise<void> {
-    const label = "PREMIUM.deleteTunedModel";
-    const slot = await getNextSlot();
-    try {
-      const prevCreds = process.env.GOOGLE_APPLICATION_CREDENTIALS;
-      if (!slot.isAdc) process.env.GOOGLE_APPLICATION_CREDENTIALS = slot.keyPath;
-      const auth = new GoogleAuth({ scopes: ["https://www.googleapis.com/auth/cloud-platform"] });
-      const accessTokenObj = await auth.getAccessToken();
-      const accessToken = typeof accessTokenObj === "string" ? accessTokenObj : (accessTokenObj as any)?.token;
-      if (prevCreds !== undefined) process.env.GOOGLE_APPLICATION_CREDENTIALS = prevCreds;
-      else if (!slot.isAdc) delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
-
-      if (!accessToken) throw new Error(`[${label}] failed to obtain access token`);
-
-      const url = `https://${IMAGEN_LOCATION}-aiplatform.googleapis.com/v1/${tunedModelName}`;
-      
-      const response = await fetch(url, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${accessToken}` },
-      });
-
-      if (!response.ok) {
-        const bodyText = await response.text().catch(() => "<unreadable>");
-        console.error(`[${label}] Failed to delete model ${tunedModelName}: ${response.status} ${bodyText.slice(0, 200)}`);
-      } else {
-        console.log(`[${label}] Successfully deleted tuned model ${tunedModelName}`);
-      }
-    } catch (err: any) {
-      console.error(`[${label}] Error deleting tuned model ${tunedModelName}:`, err);
     }
   }
 
