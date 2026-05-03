@@ -30,9 +30,9 @@ import {
 import { z } from "zod";
 import crypto from "crypto";
 
-export import { generateGcsUploadUrl } from "./gcs.js";
+import { generateGcsUploadUrl } from "./gcs.js";
 
-const apiRouter = Router();
+export const apiRouter = Router();
 
 // ─── Telegram initData Validation (Security) ─────────────────────────────────
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
