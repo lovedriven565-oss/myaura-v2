@@ -393,6 +393,7 @@ export default function UploadPremium() {
       } catch (uploadErr: any) {
         console.error("[GEN] R2 upload failed:", uploadErr);
         const msg = uploadErr?.details?.error || uploadErr?.message || "Не удалось загрузить фото";
+        alert("Ошибка загрузки в облако:\n" + msg);
         setError("Ошибка загрузки: " + msg);
         setLoading(false);
         setUploadPhase(null);

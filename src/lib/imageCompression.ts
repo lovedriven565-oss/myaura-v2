@@ -2,14 +2,14 @@
  * Frontend image compression for Telegram Mini App.
  *
  * Targets:
- *   1. Max side length: 2048px (keeps identity/detail for AI)
- *   2. Target file size: < 5MB (safely under R2/Cloud Run 20-32MB limits)
+ *   1. Max side length: 4096px (keeps identity/detail for AI)
+ *   2. Target file size: < 10MB before compression (safely under R2/Cloud Run 20-32MB limits)
  *   3. Format: image/jpeg
  */
 
 export async function compressImage(file: File): Promise<File> {
-  // If file is already small (< 2MB), skip compression to save CPU
-  if (file.size < 2 * 1024 * 1024) {
+  // If file is already small (< 10MB), skip compression to preserve facial detail
+  if (file.size < 10 * 1024 * 1024) {
     return file;
   }
 
@@ -20,8 +20,8 @@ export async function compressImage(file: File): Promise<File> {
       const img = new Image();
       img.src = event.target?.result as string;
       img.onload = () => {
-        const MAX_WIDTH = 2048;
-        const MAX_HEIGHT = 2048;
+        const MAX_WIDTH = 4096;
+        const MAX_HEIGHT = 4096;
         let width = img.width;
         let height = img.height;
 
@@ -49,7 +49,7 @@ export async function compressImage(file: File): Promise<File> {
 
         ctx.drawImage(img, 0, 0, width, height);
 
-        // Quality 0.8 is a good balance for AI identity preservation
+        // Quality 0.95 preserves facial micro-detail for AI identity preservation
         canvas.toBlob(
           (blob) => {
             if (!blob) {
@@ -64,7 +64,7 @@ export async function compressImage(file: File): Promise<File> {
             resolve(compressedFile);
           },
           "image/jpeg",
-          0.8
+          0.95
         );
       };
       img.onerror = (err) => reject(err);

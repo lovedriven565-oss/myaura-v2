@@ -220,6 +220,7 @@ export function parseAuditResponse(raw: string, expectedCount: number): Prefligh
     distinguishingFeatures: Array.isArray(fpRaw.distinguishingFeatures)
       ? fpRaw.distinguishingFeatures
           .filter((s: any) => typeof s === "string" && s.length > 0 && s.length < 60)
+          .filter(s => !/acne|pimple|blemish|spot|scar|wrinkle|pore|texture|mark/i.test(s))
           .slice(0, 5)
       : [],
     sameIdentityAcrossPhotos: fpRaw.sameIdentityAcrossPhotos !== false,
@@ -410,19 +411,20 @@ export function buildSubjectDescription(
 }
 
 /**
- * Neutral identity header injected at the front of every generation prompt
- * (V7.1 latent-space-conflict fix).
- *
- * Detailed semantic descriptors of facial features were over-weighting the
- * text encoder relative to the visual reference embedding, so the model
- * gravitated toward an idealized text-conditioned mean instead of the actual
- * uploaded face. We now emit a single neutral identifier — the visual refs
- * carry the identity, not the prose.
- *
- * Signature is preserved so existing callers continue to compile.
+ * Detailed identity header injected at the front of every generation prompt
+ * (V8.3 biometric-enhanced anchor).
  */
-export function buildIdentityHeader(_profile: SubjectProfile): string {
-  return "A specific individual. The exact person shown in the reference images.";
+export function buildIdentityHeader(profile: SubjectProfile): string {
+  const parts = [
+    "A specific individual.",
+    profile.gender !== "unset" ? GENDER_DESCRIPTOR[profile.gender] : "person",
+    profile.skinTone ? `${profile.skinTone} skin tone` : "",
+    profile.hairColor ? `${profile.hairColor} hair` : "",
+    profile.facialHair !== "none" ? profile.facialHair : "",
+    ...(profile.distinguishingFeatures || []),
+  ].filter(Boolean);
+
+  return `${parts.join(", ")}. The exact person shown in the reference images.`;
 }
 
 /** A safe fallback profile for edge-cases where audit fails but we still want

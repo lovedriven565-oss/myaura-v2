@@ -54,10 +54,11 @@ export const PREMIUM_EXCLUSIVE_STYLES: readonly StyleId[] = Object.freeze([
 // the model drifts toward when given a portrait task without strong photo
 // anchoring. Tested against gemini-3.1-flash-image-preview and Imagen 3.
 export const NEGATIVE_PROMPT =
+  "acne, pimples, skin blemishes, skin spots, red spots, skin inflammation, " +
   "3D render, CGI, computer graphics, cartoon, anime, illustration, drawing, painting, " +
   "digital painting, oil painting, watercolor, sketch, concept art, character design, " +
   "video game, game character, octane render, unreal engine, cinema 4d, blender, zbrush, " +
-  "plastic skin, waxy skin, airbrushed, over-smoothed, beauty filter, instagram filter, " +
+  "waxy skin, airbrushed, over-smoothed, " +
   "glossy doll skin, porcelain skin, uncanny valley, mannequin, action figure, statue, " +
   "masterpiece, artstation, stock photo face";
 
@@ -70,6 +71,13 @@ export const NEGATIVE_PROMPT =
 const GLOBAL_PHOTO_ANCHOR =
   "An unedited, candid photograph taken on a standard camera. " +
   "Natural, everyday lighting. Authentic, unretouched amateur photography. " +
+  "The subject is in a ";
+
+// V8.2: Premium Studio anchor. Blends high-end aesthetics with authentic detail.
+const PREMIUM_PHOTO_ANCHOR =
+  "A high-end professional studio portrait photograph. " +
+  "Perfectly balanced professional lighting with soft shadows. " +
+  "Captured on a medium format camera for maximum detail and depth. " +
   "The subject is in a ";
 
 // ─── Style blocks ──────────────────────────────────────────────────────────
@@ -148,11 +156,10 @@ const FRAMINGS = [
 
 // ─── V7.0 Texture Injection Module ─────────────────────────────────────────
 const TEXTURE_INJECTION_MODULE =
-  "Ultra-detailed macro skin rendering: visible natural pores, fine lines, and " +
-  "subtle skin imperfections. Soft diffused light reveals micro-detail without " +
-  "harsh shadows. Sharp focus on skin surface with gentle depth falloff. No " +
-  "retouching, no foundation, no beauty filter — raw natural skin with realistic " +
-  "subsurface scattering as captured by a real camera sensor.";
+  "Clean, smooth professional skin texture with subtle natural glow. " +
+  "Balanced studio lighting reveals clear facial features. " +
+  "Sharp focus on the face with elegant depth of field. " +
+  "Flawless natural skin as captured by a professional medium format sensor.";
 
 // ─── FREE tier ─────────────────────────────────────────────────────────────
 /**
@@ -170,7 +177,8 @@ export function buildFreePrompt(
   const identity = profile ? `${buildIdentityHeader(profile)} ` : "";
 
   return (
-    `${identity}${GLOBAL_PHOTO_ANCHOR}${block.label}. ` +
+    `${identity}Critically: You must extract the person from the reference image and place them in a COMPLETELY NEW environment with NEW clothing. DO NOT keep the original background or outfit. ` +
+    `${GLOBAL_PHOTO_ANCHOR}${block.label}. ` +
     `Subject is a ${framing}. ${block.environment}. ` +
     `\n\nDO NOT GENERATE: ${NEGATIVE_PROMPT}`
   );
@@ -190,6 +198,7 @@ export function buildPremiumPrompt(
 
   const basePrompt = [
     identity,
+    "Critically: You must extract the person from the reference image and place them in a COMPLETELY NEW environment with NEW clothing. DO NOT keep the original background or outfit.",
     GLOBAL_PHOTO_ANCHOR + block.label + ".",
     `${framing}, ${style}.`,
     TEXTURE_INJECTION_MODULE,
@@ -268,9 +277,8 @@ export function buildPremiumImagenPrompt(
   const subjectToken = `${subjectDescription} [1]`;
 
   const prompt =
-    `An unedited, candid photograph of ${subjectToken}. ` +
+    `${PREMIUM_PHOTO_ANCHOR}${subjectToken}. ` +
     `${block.label}. ${framing}. ${block.subject}. ${block.environment}. ` +
-    `Natural, everyday lighting. Authentic, unretouched amateur photography. ` +
     `${TEXTURE_INJECTION_MODULE} ${block.mood}.`;
 
   return { prompt, subjectDescription };

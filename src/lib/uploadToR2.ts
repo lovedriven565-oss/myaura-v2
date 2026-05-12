@@ -118,29 +118,71 @@ function putOneFileXhr(
   onByteProgress: (loaded: number, total: number) => void
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("PUT", slot.url, true);
-    for (const [k, v] of Object.entries(slot.headers)) {
-      // Content-Length is forbidden to set manually in some browsers — XHR
-      // computes it automatically from the body, and R2's signed value must
-      // match what the browser sends, which it does for a File blob.
-      if (k.toLowerCase() === "content-length") continue;
-      xhr.setRequestHeader(k, v);
-    }
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) onByteProgress(e.loaded, e.total);
-    };
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        onByteProgress(file.size, file.size); // ensure UI shows 100%
-        resolve();
-      } else {
-        reject(new Error(`R2 PUT failed: HTTP ${xhr.status} — ${xhr.responseText?.slice(0, 300) || xhr.statusText}`));
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.open("PUT", slot.url, true);
+
+      // GCS requires the Content-Type header to exactly match what was signed.
+      // If we pass the raw `file` to xhr.send(), the browser automatically sets
+      // the Content-Type based on `file.type`.
+      const expectedContentType = slot.headers["Content-Type"] || file.type;
+      const safeBlob = new Blob([file], { type: expectedContentType });
+
+      for (const [k, v] of Object.entries(slot.headers)) {
+        if (k.toLowerCase() === "content-length") continue;
+        // CRITICAL: Do NOT manually set Content-Type if we are sending a Blob.
+        // Safari/iOS will append it, resulting in "Content-Type: image/jpeg, image/jpeg".
+        // GCS strictly rejects duplicated headers with 403 SignatureDoesNotMatch.
+        // The browser will automatically infer the Content-Type from `safeBlob.type`.
+        if (k.toLowerCase() === "content-type") continue;
+        
+        xhr.setRequestHeader(k, v);
       }
-    };
-    xhr.onerror = () => reject(new Error("R2 PUT network error"));
-    xhr.onabort = () => reject(new Error("R2 PUT aborted"));
-    xhr.send(file);
+
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) onByteProgress(e.loaded, e.total);
+      };
+
+      xhr.onload = () => {
+        try {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            onByteProgress(file.size, file.size); // ensure UI shows 100%
+            resolve();
+          } else {
+            let errorMsg = xhr.statusText || "Unknown Error";
+            try {
+              if (xhr.responseText && xhr.responseText.includes("<Message>")) {
+                const match = xhr.responseText.match(/<Message>(.*?)<\/Message>/);
+                if (match && match[1]) errorMsg = match[1];
+              } else if (xhr.responseText) {
+                errorMsg = xhr.responseText.slice(0, 300);
+              }
+            } catch (e) {
+              // Accessing responseText on CORS error can throw InvalidStateError
+              errorMsg = `Cannot read response (status: ${xhr.status})`;
+            }
+            reject(new Error(`GCS PUT failed: HTTP ${xhr.status} — ${errorMsg}`));
+          }
+        } catch (e: any) {
+          reject(new Error(`GCS PUT onload error: ${e.message}`));
+        }
+      };
+
+      xhr.onerror = () => {
+        let details = "";
+        try {
+          details = `Status: ${xhr.status} ${xhr.statusText}, Text: ${xhr.responseText ? xhr.responseText.slice(0, 100) : "empty"}`;
+        } catch(e) {
+          details = `Status: ${xhr.status} (responseText unavailable)`;
+        }
+        reject(new Error(`GCS PUT network error (CORS or dropped connection). Details: ${details}`));
+      };
+      xhr.onabort = () => reject(new Error("GCS PUT aborted"));
+      
+      xhr.send(safeBlob);
+    } catch (err: any) {
+      reject(new Error(`GCS PUT sync error: ${err.message}`));
+    }
   });
 }
 

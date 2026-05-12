@@ -2,11 +2,11 @@ import { Router } from 'express';
 import { getDb } from './db.js';
 import { aiProvider } from './ai.js';
 import { storage } from './storage.js';
-import { deleteFromGcs, headGcsObject } from './gcs.js';
 import { deliverTelegramResults, deliverTelegramPhoto, sendTelegramStatus } from './telegram.js';
 import { refundCredit } from './dbQueue.js';
 import { buildFreePrompt, buildPremiumPrompt } from './prompts.js';
-import { evaluateAuditGate, mergeProfile, profileFromUserOnly } from './biometric.js';
+import type { StyleId } from './prompts.js';
+import { evaluateAuditGate, mergeProfile, type SubjectProfile } from './biometric.js';
 
 export const workerRouter = Router();
 
@@ -17,7 +17,7 @@ function verifyCloudTasksToken(req: any, res: any, next: any) {
 }
 
 workerRouter.post('/generate', verifyCloudTasksToken, async (req, res) => {
-  const { generationId, userId, mode } = req.body;
+  const { generationId, userId, mode, profile: taskProfile } = req.body;
   const db = getDb();
 
   try {
@@ -39,17 +39,21 @@ workerRouter.post('/generate', verifyCloudTasksToken, async (req, res) => {
     const sourcePaths: string[] = job.reference_paths || [job.original_path].filter(Boolean);
     const styleIds: string[] = job.style_ids || [job.prompt_preset].filter(Boolean);
     
-    // Load metadata and format GCS URIs
+    // Load metadata and format URIs using storage interface
     const auditRefs = [];
     for (const path of sourcePaths) {
-        const meta = await headGcsObject(path);
+        const meta = await storage.headObject(path);
         if (meta.exists && meta.contentType) {
-            auditRefs.push({ gcsUri: `gs://${process.env.INGESTION_BUCKET || 'myaura-ingestion'}/${path}`, mimeType: meta.contentType });
+            // Read buffer from R2, convert to base64 for Gemini
+            const buffer = await storage.get(path);
+            if (buffer) {
+                auditRefs.push({ base64: buffer.toString('base64'), mimeType: meta.contentType });
+            }
         }
     }
 
     if (auditRefs.length === 0) {
-        throw new Error("No valid references found in GCS");
+        throw new Error("No valid references found in Storage");
     }
 
     // Interim status update to Telegram
@@ -69,8 +73,9 @@ workerRouter.post('/generate', verifyCloudTasksToken, async (req, res) => {
         throw new Error(`PHOTO_QUALITY_REJECTED: ${gate.reason}`);
     }
 
-    const baseProfile = profileFromUserOnly("unset", "young"); // Ideally load from job context
-    const profile = mergeProfile(audit, baseProfile.gender, baseProfile.ageTier);
+    const profile: SubjectProfile = taskProfile && typeof taskProfile === 'object'
+      ? taskProfile as SubjectProfile
+      : mergeProfile(audit, "unset", "mature");
 
     // Update state to synthesis
     await db.from('generations').update({ status: 'processing_synthesis' }).eq('id', generationId);
@@ -89,33 +94,74 @@ workerRouter.post('/generate', verifyCloudTasksToken, async (req, res) => {
     }
 
     // Phase 3: Step 3.2 - Synthesis
-    const styleId = styleIds[0] || "business";
-    const prompt = mode === 'premium' 
-      ? buildPremiumPrompt(styleId, 0, profile) 
-      : buildFreePrompt(styleId as any, 0, profile);
+    const outputCount = mode === 'premium' ? 7 : 1;
+    const generatedUrls: string[] = [];
 
-    const generatedImageBase64 = mode === 'premium'
-      ? await aiProvider.generatePremiumTier(bestAuditRefs, prompt, profile, styleId as any, 0, generationId)
-      : await aiProvider.generateFreeTier(bestAuditRefs, prompt);
+    // Schedule styles across the output count
+    const scheduledStyles: StyleId[] = [];
+    for (let i = 0; i < outputCount; i++) {
+        scheduledStyles.push((styleIds[i % styleIds.length] || "business") as StyleId);
+    }
 
-    // Convert Base64 back to buffer for R2 upload
-    const generatedImageBuffer = Buffer.from(generatedImageBase64, 'base64');
+    // Parallel synthesis for Premium, sequential for Free (to save resources)
+    if (mode === 'premium') {
+        sendTelegramStatus(telegramChatId, `Генерируем ${outputCount} фото параллельно...`).catch(() => {});
+        
+        const tasks = scheduledStyles.map(async (styleId, i) => {
+            const prompt = buildPremiumPrompt(styleId, i, profile);
+            const imageBase64 = await aiProvider.generatePremiumTier(bestAuditRefs, prompt, profile, styleId, i, generationId);
+            
+            const buffer = Buffer.from(imageBase64, 'base64');
+            const resultUrl = await storage.save(buffer, `${generationId}_result_${i}.jpg`, "result");
+            
+            // Progressive notification (non-blocking)
+            deliverTelegramPhoto(telegramChatId, resultUrl, `Готово: ${i + 1} из ${outputCount}`).catch(() => {});
+            
+            return resultUrl;
+        });
+
+        const results = await Promise.all(tasks);
+        generatedUrls.push(...results);
+        
+        // Update DB once after all are done
+        await db.from('generations').update({ 
+            results_completed: outputCount,
+            result_paths: generatedUrls
+        }).eq('id', generationId);
+
+    } else {
+        // Free tier stays sequential
+        for (let i = 0; i < outputCount; i++) {
+            const styleId = scheduledStyles[i];
+            const prompt = buildFreePrompt(styleId, i, profile);
+            const imageBase64 = await aiProvider.generateFreeTier(bestAuditRefs, prompt);
+            
+            const buffer = Buffer.from(imageBase64, 'base64');
+            const resultUrl = await storage.save(buffer, `${generationId}_result_${i}.jpg`, "result");
+            generatedUrls.push(resultUrl);
+            
+            await db.from('generations').update({ 
+                results_completed: i + 1,
+                result_paths: generatedUrls
+            }).eq('id', generationId);
+        }
+    }
 
     // Phase 4: Delivery & Garbage Collection
-    const resultUrl = await storage.save(generatedImageBuffer, `${generationId}_result_final.jpg`, "result");
-
     await db.from('generations').update({ 
       status: 'completed', 
-      result_path: resultUrl,
-      results_completed: 1,
-      result_paths: [resultUrl]
+      result_path: generatedUrls[0], // primary
+      results_completed: outputCount,
+      result_paths: generatedUrls
     }).eq('id', generationId);
 
     // Notify Telegram
-    await deliverTelegramResults(telegramChatId, [resultUrl], null, mode);
+    await deliverTelegramResults(telegramChatId, generatedUrls, null, mode);
 
-    // 4.4 GDPR Garbage Collection: мгновенное удаление оригиналов из GCS
-    await deleteFromGcs(sourcePaths);
+    // 4.4 GDPR Garbage Collection: мгновенное удаление оригиналов из Storage
+    for (const path of sourcePaths) {
+        await storage.delete(path);
+    }
 
     return res.status(200).send('OK');
 
@@ -126,7 +172,9 @@ workerRouter.post('/generate', verifyCloudTasksToken, async (req, res) => {
     if (error.status !== 429 && error.status < 500) {
         const { data: job } = await db.from('generations').select('reference_paths').eq('id', generationId).single();
         if (job?.reference_paths) {
-            await deleteFromGcs(job.reference_paths);
+            for (const path of job.reference_paths) {
+                await storage.delete(path);
+            }
         }
     }
 
@@ -138,7 +186,7 @@ workerRouter.post('/generate', verifyCloudTasksToken, async (req, res) => {
       const { data: job } = await db.from('generations').select('credit_type, telegram_user_id').eq('id', generationId).single();
       if (job?.credit_type && job?.telegram_user_id) {
         await refundCredit(job.telegram_user_id, job.credit_type, generationId, `Worker error: ${error.message}`);
-        await deliverTelegramPhoto(job.telegram_user_id, `Произошла ошибка: ${error.message}. Твои кредиты возвращены.`, "").catch(() => {});
+        await sendTelegramStatus(job.telegram_user_id, `Произошла ошибка: ${error.message}. Твои кредиты возвращены.`).catch(() => {});
       }
     }
     

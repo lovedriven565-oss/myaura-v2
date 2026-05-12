@@ -45,15 +45,16 @@ import {
   type SubjectProfile,
 } from "./biometric.js";
 import { getDb } from "./db.js";
-import { uploadTuningDataset, TUNING_BUCKET_NAME } from "./gcs.js";
 import { buildPremiumImagenPrompt, NEGATIVE_PROMPT } from "./prompts.js";
 import type { StyleId } from "./prompts.js";
 
 // ─── Public Interface ───────────────────────────────────────────────────────
 
 export interface ImageRef {
+  /** base64-encoded image bytes (inlineData path) */
+  base64?: string;
   /** GCS URI to the image (gs://bucket/path) */
-  gcsUri: string;
+  gcsUri?: string;
   /** MIME type, e.g. "image/jpeg" / "image/png" / "image/webp". */
   mimeType: string;
 }
@@ -113,6 +114,7 @@ const PRO_LOCATION = "global";
 const IMAGEN_LOCATION = process.env.IMAGEN_LOCATION_ID || "us-central1";
 // Imagen uses the v1 stable surface (NOT v1beta1).
 const IMAGEN_API_VERSION = "v1";
+const IMAGEN_MAX_REFERENCE_IMAGES = Math.max(1, parseInt(process.env.IMAGEN_MAX_REFERENCE_IMAGES || "14", 10));
 
 // ─── Timeouts ────────────────────────────────────────────────────────────────────
 // Per-model timeouts are enforced via disposable AbortControllers (httpOptions
@@ -148,8 +150,7 @@ const VERTEX_ADC_PROJECT = process.env.GOOGLE_PROJECT_ID || process.env.GOOGLE_C
 // Diagnostic (run-once): reveal the real identity Cloud Run gave us.
 async function logActiveIdentity(): Promise<void> {
   try {
-    const fetch = (await import("node-fetch")).default || globalThis.fetch;
-    const res = await fetch(
+    const res = await globalThis.fetch(
       "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email",
       { headers: { "Metadata-Flavor": "Google" }, signal: AbortSignal.timeout(2000) },
     );
@@ -370,7 +371,7 @@ export class VertexAIProvider implements IGenerationProvider {
     );
   }
 
-  // ═════ PREMIUM TIER (V2.0: Event-Driven Cloud Tasks) ══════════════
+  // ═════ PREMIUM TIER (V8.1) ══════════════════════════════════════════════
   async generatePremiumTier(
     refs: ImageRef[],
     fallbackPrompt: string,
@@ -381,8 +382,15 @@ export class VertexAIProvider implements IGenerationProvider {
   ): Promise<string> {
     if (!refs || refs.length === 0) throw new Error("generatePremiumTier: refs[] required");
 
-    // We no longer build an Imagen 3 prompt with [1] placeholders.
-    // fallbackPrompt is the pure Gemini prompt built externally, which incorporates biometric anchors.
+    if (profile && styleId !== undefined && index !== undefined) {
+      try {
+        return await this._callImagen3SubjectCustomization(refs, profile, styleId, index);
+      } catch (err: any) {
+        console.error(`[PREMIUM.imagen] Failed, falling back to Gemini Pro:`, err);
+        // fall through
+      }
+    }
+
     console.log(`[PREMIUM.pro] refs=${refs.length} | region=${PRO_LOCATION}`);
 
     // Call Gemini 3 Pro Image (or equivalent) using fileData.
@@ -390,6 +398,135 @@ export class VertexAIProvider implements IGenerationProvider {
       () => this._callGeminiImage(PRO_MODEL, PRO_LOCATION, PRO_CALL_TIMEOUT_MS, refs, fallbackPrompt, 0.4, 0.95, "PREMIUM.pro"),
       "PREMIUM.pro",
     );
+  }
+
+  // ─── Imagen 3 Subject Customization (V8.1 — raw REST predict) ──────────
+  private async _callImagen3SubjectCustomization(
+    refs: ImageRef[],
+    profile: SubjectProfile,
+    styleId: StyleId,
+    index: number,
+  ): Promise<string> {
+    const slot = await getNextSlot();
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), IMAGEN_CALL_TIMEOUT_MS);
+    const label = "PREMIUM.imagen";
+
+    try {
+      const { prompt, subjectDescription } = buildPremiumImagenPrompt(styleId, index, profile);
+
+      const usableRefs = refs.slice(0, IMAGEN_MAX_REFERENCE_IMAGES);
+
+      const subjectImages = usableRefs.map((r, i) => ({
+        referenceType: "REFERENCE_TYPE_SUBJECT",
+        referenceId: 1,
+        referenceImage: {
+          bytesBase64Encoded: r.base64,
+          mimeType: r.mimeType,
+        },
+        subjectImageConfig: {
+          subjectType: "SUBJECT_TYPE_PERSON",
+          subjectDescription,
+        }
+      }));
+
+      const payload = {
+        instances: [{
+          prompt,
+          referenceImages: subjectImages,
+        }],
+        parameters: {
+          sampleCount: 1,
+          aspectRatio: "9:16",
+          guidanceScale: 5.0,
+          personGeneration: "allow_all",
+          negativePrompt: NEGATIVE_PROMPT,
+          safetySetting: "block_only_high",
+          includeRaiReason: true,
+          language: "en",
+        },
+      };
+
+      const prevCreds = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+      if (!slot.isAdc) process.env.GOOGLE_APPLICATION_CREDENTIALS = slot.keyPath;
+      const auth = new GoogleAuth({
+        scopes: ["https://www.googleapis.com/auth/cloud-platform"],
+      });
+      const accessTokenObj = await auth.getAccessToken();
+      const accessToken = typeof accessTokenObj === "string"
+        ? accessTokenObj
+        : (accessTokenObj as any)?.token;
+      if (prevCreds !== undefined) process.env.GOOGLE_APPLICATION_CREDENTIALS = prevCreds;
+      else if (!slot.isAdc) delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+      
+      if (!accessToken) throw new Error(`[${label}] failed to obtain access token`);
+
+      const projectId = slot.isAdc ? VERTEX_ADC_PROJECT : slot.projectId;
+      if (!projectId) throw new Error(`[${label}] no project id resolved`);
+
+      const url =
+        `https://${IMAGEN_LOCATION}-aiplatform.googleapis.com/${IMAGEN_API_VERSION}/projects/${projectId}` +
+        `/locations/${IMAGEN_LOCATION}/publishers/google/models/${IMAGEN_MODEL}:predict`;
+
+      console.log(
+        `[${label}] model=${IMAGEN_MODEL} refs=${subjectImages.length}/${refs.length} ` +
+        `cfg=${payload.parameters.guidanceScale} ` +
+        `desc="${subjectDescription}" prompt[0..160]="${prompt.slice(0, 160)}"`
+      );
+
+      const fetch = globalThis.fetch;
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json; charset=utf-8",
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        const bodyText = await response.text().catch(() => "<unreadable>");
+        const err: any = new Error(
+          `[${label}] HTTP ${response.status}: ${bodyText.slice(0, 500)}`
+        );
+        err.status = response.status;
+        err.responseBody = bodyText;
+        throw err;
+      }
+
+      const json: any = await response.json();
+      const predictions: any[] = json?.predictions || [];
+      if (predictions.length === 0) {
+        throw new Error(`[${label}] response had no predictions`);
+      }
+
+      const first = predictions[0];
+      const imageBytes: string | undefined =
+        first?.bytesBase64Encoded || first?.imageBytes;
+      if (!imageBytes) {
+        const raiReason = first?.raiFilteredReason;
+        if (raiReason) {
+          throw Object.assign(new Error(`[${label}] safety filter: ${raiReason}`), {
+            isSafetyBlock: true,
+          });
+        }
+        throw new Error(`[${label}] no image bytes in prediction`);
+      }
+      return imageBytes;
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      this._classifyAndCooldown(slot, err, label);
+      if (controller.signal.aborted) {
+        throw Object.assign(
+          new Error(`[${label}] timeout after ${IMAGEN_CALL_TIMEOUT_MS}ms`),
+          { isTimeout: true },
+        );
+      }
+      throw err;
+    }
   }
 
   // ═════ AUDIT ═════════════════════════════════════════════════════════════
@@ -420,11 +557,23 @@ export class VertexAIProvider implements IGenerationProvider {
     try {
       const client = createClient(slot, controller.signal, location, API_VERSION);
 
-      // Multimodal payload: image parts first, then text prompt.
-      const contents: any[] = refs.map(r => ({
-        fileData: { fileUri: r.gcsUri, mimeType: r.mimeType },
-      }));
-      contents.push({ text: prompt });
+      // Multimodal payload: single user Content with image parts + text.
+      const imageParts = refs.map(r => {
+        if (r.base64) {
+          return { inlineData: { data: r.base64, mimeType: r.mimeType } };
+        }
+        if (r.gcsUri) {
+          return { fileData: { fileUri: r.gcsUri, mimeType: r.mimeType } };
+        }
+        throw new Error(`[${label}] ImageRef missing both base64 and gcsUri`);
+      });
+
+      const contents = [{
+        role: "user",
+        parts: [...imageParts, { text: prompt }],
+      }];
+
+      console.log(`[${label}] sending ${imageParts.length} image(s) + prompt[0..120]="${prompt.slice(0, 120)}"`);
 
       const response = await client.models.generateContent({
         model: modelId,
@@ -442,8 +591,14 @@ export class VertexAIProvider implements IGenerationProvider {
 
       clearTimeout(timeoutId);
 
-      for (const part of response.candidates?.[0]?.content?.parts || []) {
-        if (part.inlineData?.data) return part.inlineData.data;
+      const parts = response.candidates?.[0]?.content?.parts || [];
+      console.log(`[${label}] response parts=${parts.length} types=${parts.map((p: any) => p.inlineData ? "image" : p.text ? "text" : "other").join(",")}`);
+      
+      for (const part of parts) {
+        if (part.inlineData?.data) {
+          console.log(`[${label}] returning generated image (${part.inlineData.data.length} chars base64)`);
+          return part.inlineData.data;
+        }
       }
       throw new Error(`[${label}] model returned no image parts`);
     } catch (err: any) {
@@ -473,10 +628,20 @@ export class VertexAIProvider implements IGenerationProvider {
     try {
       const client = createClient(slot, controller.signal, FLASH_LOCATION, API_VERSION);
 
-      const contents: any[] = refs.map(r => ({
-        fileData: { fileUri: r.gcsUri, mimeType: r.mimeType },
-      }));
-      contents.push({ text: prompt });
+      const imageParts = refs.map(r => {
+        if (r.base64) {
+          return { inlineData: { data: r.base64, mimeType: r.mimeType } };
+        }
+        if (r.gcsUri) {
+          return { fileData: { fileUri: r.gcsUri, mimeType: r.mimeType } };
+        }
+        throw new Error(`[judge] ImageRef missing both base64 and gcsUri`);
+      });
+
+      const contents = [{
+        role: "user",
+        parts: [...imageParts, { text: prompt }],
+      }];
 
       const response = await client.models.generateContent({
         model: JUDGE_MODEL,

@@ -1,4 +1,5 @@
 import { CloudTasksClient } from "@google-cloud/tasks";
+import type { SubjectProfile } from "./biometric.js";
 
 const client = new CloudTasksClient();
 
@@ -8,7 +9,12 @@ const QUEUE_ID = process.env.CLOUD_TASKS_QUEUE || "generation-queue";
 const WORKER_URL = process.env.WORKER_URL || "https://myaura-worker-url.run.app/api/worker/generate";
 const SERVICE_ACCOUNT_EMAIL = process.env.CLOUD_TASKS_SA_EMAIL || "";
 
-export async function enqueueGenerationTask(generationId: string, userId: string, mode: "free" | "premium") {
+export async function enqueueGenerationTask(
+  generationId: string,
+  userId: string,
+  mode: "free" | "premium",
+  profile?: SubjectProfile,
+) {
   if (!PROJECT_ID) {
     console.warn("[CloudTasks] Missing PROJECT_ID. Skipping enqueue.");
     return;
@@ -20,6 +26,7 @@ export async function enqueueGenerationTask(generationId: string, userId: string
     generationId,
     userId,
     mode,
+    profile,
   };
 
   const task: any = {

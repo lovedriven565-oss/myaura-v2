@@ -147,6 +147,10 @@ export async function deliverTelegramPhoto(
     console.warn("[Telegram] delivery skipped: bot not initialized");
     return;
   }
+  if (!resultPath) {
+    console.warn("[Telegram] delivery skipped: empty resultPath");
+    return;
+  }
   const publicBaseUrl = process.env.R2_PUBLIC_BASE_URL || "";
   const url = `${publicBaseUrl}/${resultPath}`;
   try {

@@ -168,6 +168,7 @@ export default function UploadFree() {
     } catch (uploadErr: any) {
       console.error("[UploadFree] R2 upload failed:", uploadErr);
       const msg = uploadErr?.details?.error || uploadErr?.message || "Не удалось загрузить фото";
+      alert("Ошибка загрузки в облако:\n" + msg);
       setError("Ошибка загрузки: " + msg);
       setLoading(false);
       setUploadPhase(null);
